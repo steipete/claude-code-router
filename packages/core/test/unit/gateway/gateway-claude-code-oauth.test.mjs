@@ -4,6 +4,7 @@ import {
   normalizeClaudeCodeOauthProviderPlugins,
   prepareGatewayUpstreamAttemptForTest
 } from "@ccr/core/gateway/service.ts";
+import { applyCompiledRouteRewrite, compileConfiguredRouteRewrite } from "@ccr/core/routing/rewrite.ts";
 
 test("issue 1528 normalizes Claude Code OAuth auth to preserve the client anthropic-beta header", () => {
   const [plugin] = normalizeClaudeCodeOauthProviderPlugins([
@@ -83,4 +84,71 @@ test("issue 1528 merges Claude Code OAuth beta with client beta tokens only for 
     "context-management-2025-06-27,effort-2025-11-24,oauth-2025-04-20"
   );
   assert.equal(otherAttempt.headers["anthropic-beta"], "context-management-2025-06-27");
+});
+
+
+test("Fable fallback rewrites preserve client betas across Claude OAuth authentication", () => {
+  const provider = {
+    api_base_url: "https://api.anthropic.com",
+    id: "provider-claude-code-api-test",
+    models: ["claude-fable-5"],
+    name: "Claude Code API",
+    type: "anthropic_messages"
+  };
+  const config = {
+    Providers: [provider],
+    Router: { fallback: { mode: "off", models: [], retryCount: 0 } },
+    gateway: {},
+    providerPlugins: normalizeClaudeCodeOauthProviderPlugins([{
+      auth: {
+        headers: {
+          authorization: "Bearer oauth-token",
+          "anthropic-beta": "oauth-2025-04-20"
+        },
+        removeHeaders: ["x-api-key"],
+        strict: true
+      },
+      key: "ccr-local-agent-claude-code-api-claude-code-oauth",
+      providerName: provider.name
+    }])
+  };
+  const request = {
+    body: {
+      messages: [{ content: "hi", role: "user" }],
+      model: "Claude Code API/claude-fable-5"
+    },
+    headers: {
+      "anthropic-beta": "context-management-2025-06-27,effort-2025-11-24",
+      "anthropic-version": "2023-06-01",
+      "x-api-key": "client-key"
+    }
+  };
+  for (const rewrite of [
+    {
+      key: "request.header.anthropic-beta",
+      operation: "array-append",
+      value: "server-side-fallback-2026-06-01"
+    },
+    {
+      key: "request.body.fallbacks",
+      operation: "set",
+      value: '[{"model":"claude-opus-5"}]'
+    }
+  ]) {
+    applyCompiledRouteRewrite(compileConfiguredRouteRewrite(rewrite).rewrite, request);
+  }
+
+  const attempt = prepareGatewayUpstreamAttemptForTest({
+    ...request,
+    config,
+    method: "POST",
+    path: "/v1/messages"
+  });
+
+  assert.equal(
+    attempt.headers["anthropic-beta"],
+    "context-management-2025-06-27,effort-2025-11-24,server-side-fallback-2026-06-01,oauth-2025-04-20"
+  );
+  assert.equal(attempt.headers["anthropic-version"], "2023-06-01");
+  assert.deepEqual(attempt.body.fallbacks, [{ model: "claude-opus-5" }]);
 });

@@ -266,7 +266,7 @@ const response = await api.fetch(url, {
 }
 ```
 
-`key` 必须以 `request.body.`、`request.header.` 或 `request.headers.` 开头。Body 路径使用点号分段，数字段表示数组下标。Header 名会转成小写；Header 改写只应使用 `set` 或 `delete`，且 `set` 的值必须是字符串。
+`key` 必须以 `request.body.`、`request.header.` 或 `request.headers.` 开头。Body 路径使用点号分段，数字段表示数组下标。Header 名会转成小写；Header 的 `set`、数组操作值和 `array-replace` 匹配值必须是字符串，数组操作使用逗号分隔的 Header token。
 
 | `operation` | 必需字段 | 行为 |
 | --- | --- | --- |
@@ -456,7 +456,7 @@ Header 名不区分大小写。Body 字段按点号路径读取，数字片段�
 | **从数组移除** | key、值 | 从目标数组中移除等于该值的元素。 |
 | **替换数组元素** | key、匹配值、值 | 把数组中匹配 **匹配值** 的元素替换为新值。 |
 
-Rewrite 的值也会按字面量解析，所以 `0.2` 会变成数字，`true` 会变成布尔值，`{"type":"web_search"}` 会变成对象。只有 `request.body.model` 的值会额外按 CCR 的模型选择器格式规范化。
+请求体 Rewrite 的值会按字面量解析，所以 `0.2` 会变成数字，`true` 会变成布尔值，`{"type":"web_search"}` 会变成对象。只有 `request.body.model` 的值会额外按 CCR 的模型选择器格式规范化。Header 值始终保持字符串；Header 数组操作会把当前值视为有序的逗号分隔 token 列表，移除空项、保留顺序、避免重复，并在没有 token 时删除该 Header。
 
 ### 失败时
 

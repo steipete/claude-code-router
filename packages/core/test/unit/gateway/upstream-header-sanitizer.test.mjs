@@ -68,6 +68,7 @@ test("gateway sanitizer hook forwards client headers without overriding provider
         host: "127.0.0.1:3457",
         "http-referer": "https://cherry-ai.com",
         "user-agent": "Codex Desktop",
+        "x-api-key": "client-key",
         "x-auth-api-key-id": "profile:codex",
         "x-auth-provider-extension": "provider-extension",
         "x-ccr-core-auth": "core-secret",

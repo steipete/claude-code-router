@@ -266,7 +266,7 @@ A string, number, or array is not a valid routing result. Unknown object fields 
 }
 ```
 
-`key` must start with `request.body.`, `request.header.`, or `request.headers.`. Body paths use dot-separated segments, and numeric segments address array indexes. Header names are converted to lowercase. Header rewrites should use only `set` or `delete`, and a header `set` value must be a string.
+`key` must start with `request.body.`, `request.header.`, or `request.headers.`. Body paths use dot-separated segments, and numeric segments address array indexes. Header names are converted to lowercase. Header `set`, array-operation values, and `array-replace` match values must be strings; array operations use comma-delimited header tokens.
 
 | `operation` | Required fields | Behavior |
 | --- | --- | --- |
@@ -456,7 +456,7 @@ Click **Add parameter** to add more rewrite rows. The trash button removes a row
 | **Remove from array** | key, value | Removes array elements equal to the value. |
 | **Replace in array** | key, match value, value | Replaces array elements matching **Match value** with the new value. |
 
-Rewrite values are also parsed as literals, so `0.2` becomes a number, `true` becomes a boolean, and `{"type":"web_search"}` becomes an object. Only `request.body.model` receives additional CCR model-selector normalization.
+For request-body rewrites, values are parsed as literals, so `0.2` becomes a number, `true` becomes a boolean, and `{"type":"web_search"}` becomes an object. Only `request.body.model` receives additional CCR model-selector normalization. Header values remain strings. Header array operations treat the current value as an ordered comma-delimited token list: they trim empty entries, preserve order, avoid duplicates, and delete the header when no tokens remain.
 
 ### On Failure
 

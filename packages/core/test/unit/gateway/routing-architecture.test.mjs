@@ -7,7 +7,11 @@ import { createRouteExecutionPlan } from "@ccr/core/routing/execution-plan.ts";
 import { classifyRouteFailure } from "@ccr/core/routing/failure-classifier.ts";
 import { ModelRegistry } from "@ccr/core/routing/model-registry.ts";
 import { RoutePolicyEngine } from "@ccr/core/routing/policy-engine.ts";
-import { compileConfiguredRouteRewrite, compileScriptRouteRewrite } from "@ccr/core/routing/rewrite.ts";
+import {
+  applyCompiledRouteRewrite,
+  compileConfiguredRouteRewrite,
+  compileScriptRouteRewrite
+} from "@ccr/core/routing/rewrite.ts";
 import {
   adaptRouteRequestBody,
   restoreRouteRequestBody,
@@ -336,6 +340,64 @@ test("dynamic script rewrites cannot mutate protected headers without breaking t
     operation: "set",
     value: "true"
   }).rewrite?.value, "true");
+});
+
+test("header array rewrites preserve ordered comma-delimited values", () => {
+  const request = {
+    body: {},
+    headers: {
+      "anthropic-beta": ["context-management-2025-06-27", "effort-2025-11-24, oauth-2025-04-20"]
+    }
+  };
+  const rewrite = (operation, value, match) => compileConfiguredRouteRewrite({
+    key: "request.header.anthropic-beta",
+    ...(match === undefined ? {} : { match }),
+    operation,
+    value
+  }).rewrite;
+
+  applyCompiledRouteRewrite(rewrite("array-append", "server-side-fallback-2026-06-01"), request);
+  applyCompiledRouteRewrite(rewrite("array-append", "oauth-2025-04-20"), request);
+  assert.equal(
+    request.headers["anthropic-beta"],
+    "context-management-2025-06-27,effort-2025-11-24,oauth-2025-04-20,server-side-fallback-2026-06-01"
+  );
+
+  applyCompiledRouteRewrite(rewrite("array-prepend", "claude-code-20250219"), request);
+  assert.equal(request.headers["anthropic-beta"].startsWith("claude-code-20250219,"), true);
+
+  applyCompiledRouteRewrite(rewrite("array-replace", "fallback-credit-2026-06-01", "server-side-fallback-2026-06-01"), request);
+  assert.equal(request.headers["anthropic-beta"].includes("server-side-fallback-2026-06-01"), false);
+  assert.equal(request.headers["anthropic-beta"].includes("fallback-credit-2026-06-01"), true);
+
+  applyCompiledRouteRewrite(rewrite("array-remove", "fallback-credit-2026-06-01,oauth-2025-04-20"), request);
+  assert.equal(request.headers["anthropic-beta"], "claude-code-20250219,context-management-2025-06-27,effort-2025-11-24");
+});
+
+test("header array rewrites create missing headers and keep configured matches as strings", () => {
+  const request = { body: {}, headers: {} };
+  const append = compileConfiguredRouteRewrite({
+    key: "request.header.anthropic-beta",
+    operation: "array-append",
+    value: "server-side-fallback-2026-06-01"
+  }).rewrite;
+  const replace = compileConfiguredRouteRewrite({
+    key: "request.header.x-boolean-text",
+    match: "true",
+    operation: "array-replace",
+    value: "false"
+  }).rewrite;
+
+  assert.equal(replace.match, "true");
+  assert.equal(replace.value, "false");
+  applyCompiledRouteRewrite(append, request);
+  assert.equal(request.headers["anthropic-beta"], "server-side-fallback-2026-06-01");
+  assert.match(compileScriptRouteRewrite({
+    key: "request.header.x-test",
+    match: true,
+    operation: "array-replace",
+    value: "false"
+  }).error, /string match value/i);
 });
 
 test("route policy engine returns the first matching policy", async () => {

@@ -102,10 +102,15 @@ function compileRouteRewrite(
     value = parsedPath.scope === "headers"
       ? value
       : typeof value === "string" ? configuredRewriteValue(key, value) : value;
-    match = typeof match === "string" ? parseRewriteLiteral(match) : match;
+    match = parsedPath.scope === "headers"
+      ? match
+      : typeof match === "string" ? parseRewriteLiteral(match) : match;
   }
   if (parsedPath.scope === "headers" && operation !== "delete" && typeof value !== "string") {
     return { error: `Header rewrite "${key}" requires a string value.` };
+  }
+  if (parsedPath.scope === "headers" && operation === "array-replace" && typeof match !== "string") {
+    return { error: `Header rewrite "${key}" requires a string match value.` };
   }
   if (!isJsonValue(value) || !isJsonValue(match)) {
     return { error: `Route rewrite "${key}" contains a non-JSON value.` };
@@ -152,11 +157,7 @@ export function applyCompiledRouteRewrite(
   if (rewrite.scope === "headers") {
     const name = rewrite.path[0];
     const before = request.headers[name];
-    if (rewrite.operation === "delete") {
-      delete request.headers[name];
-    } else {
-      request.headers[name] = rewrite.value as string;
-    }
+    applyHeaderRewrite(request.headers, name, rewrite);
     return createReportedRewriteChange("headers", `/headers/${escapeJsonPointer(name)}`, before, request.headers[name]);
   }
 
@@ -211,6 +212,56 @@ export function isSafeRouteReadPath(path: string): boolean {
   const parts = path.split(".").map((part) => part.trim()).filter(Boolean);
   return parts.length > 2 && parts[0] === "request" && parts[1] === "body" &&
     parts.slice(2).every((part) => !unsafePathSegments.has(part.toLowerCase()));
+}
+
+function applyHeaderRewrite(
+  headers: Record<string, HeaderValue>,
+  name: string,
+  rewrite: CompiledRouteRewrite
+): void {
+  if (rewrite.operation === "delete") {
+    delete headers[name];
+    return;
+  }
+  if (rewrite.operation === "set") {
+    headers[name] = rewrite.value as string;
+    return;
+  }
+
+  const current = headerListTokens(headers[name]);
+  const value = headerListTokens(rewrite.value);
+  if (rewrite.operation === "array-append") {
+    setHeaderListTokens(headers, name, [...current, ...value]);
+    return;
+  }
+  if (rewrite.operation === "array-prepend") {
+    setHeaderListTokens(headers, name, [...value, ...current]);
+    return;
+  }
+  if (rewrite.operation === "array-remove") {
+    const removed = new Set(value);
+    setHeaderListTokens(headers, name, current.filter((token) => !removed.has(token)));
+    return;
+  }
+
+  const matches = new Set(headerListTokens(rewrite.match));
+  setHeaderListTokens(headers, name, current.flatMap((token) => matches.has(token) ? value : [token]));
+}
+
+function headerListTokens(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return values.flatMap((item) => typeof item === "string" ? item.split(",") : [])
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function setHeaderListTokens(headers: Record<string, HeaderValue>, name: string, tokens: string[]): void {
+  const unique = [...new Set(tokens)];
+  if (unique.length === 0) {
+    delete headers[name];
+    return;
+  }
+  headers[name] = unique.join(",");
 }
 
 function applyBodyRewrite(body: Record<string, unknown>, rewrite: CompiledRouteRewrite): void {
