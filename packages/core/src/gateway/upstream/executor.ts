@@ -766,7 +766,22 @@ function usageAwareOpenAiChatAttemptBody(input: {
   const sanitizedBody = stripUnsupportedOpenAiRequestParameters(input.body);
   return providerProtocol === "openai_chat_completions"
     ? usageAwareOpenAiChatBody(sanitizedBody)
-    : sanitizedBody;
+    : withMinimumOpenAiResponsesOutputTokens(sanitizedBody);
+}
+
+function withMinimumOpenAiResponsesOutputTokens(body: Buffer | undefined): Buffer | undefined {
+  const parsedBody = parseJsonObjectSafe(body);
+  if (!parsedBody) return body;
+  const maxTokens = typeof parsedBody.max_tokens === "number" ? parsedBody.max_tokens : undefined;
+  const maxOutputTokens = typeof parsedBody.max_output_tokens === "number" ? parsedBody.max_output_tokens : undefined;
+  if ((maxTokens === undefined || maxTokens >= 16) && (maxOutputTokens === undefined || maxOutputTokens >= 16)) {
+    return body;
+  }
+  return serializeJsonBody({
+    ...parsedBody,
+    ...(maxTokens !== undefined && maxTokens < 16 ? { max_tokens: 16 } : {}),
+    ...(maxOutputTokens !== undefined && maxOutputTokens < 16 ? { max_output_tokens: 16 } : {})
+  });
 }
 
 

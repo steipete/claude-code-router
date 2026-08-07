@@ -42,3 +42,25 @@ test("Claude credential affinity distributes independent sessions", () => {
   assert.ok(selected.size > 1, `expected multiple credentials, got ${[...selected].join(",")}`);
 });
 
+test("OpenAI Responses clamps one-token Desktop probes to the provider minimum", () => {
+  const attempt = prepareGatewayUpstreamAttemptForTest({
+    body: { max_tokens: 1, messages: [{ content: ".", role: "user" }], model: "Codex Direct/gpt-5.6-sol" },
+    config: {
+      Providers: [{
+        apiKey: "synthetic-openai-key",
+        api_base_url: "https://api.openai.com/v1",
+        id: "codex-direct",
+        models: ["gpt-5.6-sol"],
+        name: "Codex Direct",
+        type: "openai_responses"
+      }],
+      Router: { fallback: { mode: "off", models: [], retryCount: 0 } },
+      gateway: {}
+    },
+    headers: {},
+    method: "POST",
+    path: "/v1/messages"
+  });
+
+  assert.equal(attempt.body.max_tokens, 16);
+});
