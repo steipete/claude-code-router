@@ -1593,6 +1593,7 @@ function App() {
       capabilities: capabilities.length > 0 ? capabilities : undefined,
       account: accountConfig,
       credentials: credentials.length > 0 ? credentials : undefined,
+      credentialSessionAffinity: existingProvider?.credentialSessionAffinity,
       enabled: existingProvider?.enabled === false ? false : undefined,
       icon: providerDraft.icon.trim() || undefined,
       id: providerId,

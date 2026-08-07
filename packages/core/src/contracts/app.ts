@@ -167,6 +167,8 @@ export type GatewayProviderConfig = {
   billing?: unknown;
   capabilities?: GatewayProviderCapability[];
   credentials?: ProviderCredentialConfig[];
+  /** Keep all requests from one Claude Code session on the same credential. */
+  credentialSessionAffinity?: boolean;
   extraBody?: unknown;
   extraHeaders?: unknown;
   icon?: string;

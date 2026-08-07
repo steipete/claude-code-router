@@ -11,6 +11,7 @@ import type {
 export type OAuthTokenSet = {
   accountId?: string;
   accessToken?: string;
+  deviceId?: string;
   isFedrampAccount?: boolean;
   refreshToken?: string;
   sourceFile: string;

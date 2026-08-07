@@ -1,13 +1,16 @@
-import { readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
+import { readClaudeCodeOauth, readGrokAuth, readKimiAuth, resolveClaudeCodeOauthSource, resolveGrokAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/service";
 import { grokAccessTokenExpired, grokClientVersion } from "@ccr/core/agents/local-providers/grok";
 import { kimiAccessTokenExpired, kimiIdentityHeaders } from "@ccr/core/agents/local-providers/kimi";
 import { transformCodexApplyPatchBridgeRequestBody } from "@ccr/core/gateway/features/codex-patch-bridge";
+import { prepareClaudeCodeOauthBody } from "@ccr/core/agents/local-providers/claude-code-cch";
+import { randomUUID } from "node:crypto";
 import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta } from "@ccr/core/gateway/internal/shared";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import { mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
 
 const configProviderPluginKeyPrefix = "config:";
 const localAgentProviderPluginKeyPrefix = "ccr-local-agent-";
+const claudeOauthSourceHeader = "x-ccr-claude-oauth-source";
 
 type HeaderRecord = Record<string, string>;
 
@@ -137,11 +140,17 @@ async function authenticateClaudeCode(
   input: ProviderPluginInput,
   plugin: Record<string, unknown>
 ): Promise<ProviderHookResult> {
-  const token = readClaudeCodeOauth()?.accessToken || originalBearerToken(plugin);
+  const sourceFile = claudeOauthSourceFile(plugin);
+  const oauth = sourceFile
+    ? await resolveClaudeCodeOauthSource(sourceFile)
+    : readClaudeCodeOauth();
+  const token = oauth?.accessToken || (!sourceFile ? originalBearerToken(plugin) : undefined);
   if (!token) {
     return { error: "Claude Code access token was not found.", ok: false };
   }
   const headers = withBearerAuth(input.upstreamRequest.headers, token, originalRemoveHeaders(plugin));
+  const sessionId = requestHeader(input.request?.headers, "x-claude-code-session-id") || randomUUID();
+  applyClaudeCodeIdentityHeaders(headers, sessionId);
   headers[claudeCodeOauthBetaHeader] = mergeAnthropicBetaValues(
     requestHeader(input.request?.headers, claudeCodeOauthBetaHeader),
     originalAnthropicBetaDefault(plugin),
@@ -151,9 +160,65 @@ async function authenticateClaudeCode(
     ok: true,
     value: {
       ...input.upstreamRequest,
+      body: prepareClaudeCodeOauthBody(applyClaudeCodeCredentialIdentity(input.upstreamRequest.body, oauth, sessionId)),
       headers
     }
   };
+}
+
+function applyClaudeCodeIdentityHeaders(headers: HeaderRecord, sessionId: string): void {
+  const defaults: HeaderRecord = {
+    Accept: "application/json",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Anthropic-Dangerous-Direct-Browser-Access": "true",
+    "Anthropic-Version": "2023-06-01",
+    "User-Agent": "claude-cli/2.1.223 (external, cli)",
+    "X-App": "cli",
+    "X-Claude-Code-Session-Id": sessionId,
+    "X-Client-Request-Id": randomUUID(),
+    "X-Stainless-Arch": process.arch === "arm64" ? "arm64" : "x64",
+    "X-Stainless-Lang": "js",
+    "X-Stainless-Os": process.platform === "darwin" ? "MacOS" : "Linux",
+    "X-Stainless-Retry-Count": "0",
+    "X-Stainless-Runtime": "node",
+    "X-Stainless-Runtime-Version": process.version.slice(1),
+    "X-Stainless-Timeout": "600"
+  };
+  for (const [name, value] of Object.entries(defaults)) {
+    if (!requestHeader(headers, name)) setHeader(headers, name, value);
+  }
+}
+
+function applyClaudeCodeCredentialIdentity(
+  body: unknown,
+  oauth: { accountId?: string; deviceId?: string } | undefined,
+  sessionId: string
+): unknown {
+  if (!isRecord(body) || !oauth?.accountId || !oauth.deviceId) return body;
+  const metadata = isRecord(body.metadata) ? { ...body.metadata } : {};
+  let existing: Record<string, unknown> = {};
+  if (typeof metadata.user_id === "string") {
+    try {
+      const parsed = JSON.parse(metadata.user_id) as unknown;
+      if (isRecord(parsed)) existing = parsed;
+    } catch {
+      existing = {};
+    }
+  }
+  metadata.user_id = JSON.stringify({
+    ...existing,
+    account_uuid: oauth.accountId,
+    device_id: oauth.deviceId,
+    session_id: sessionId
+  });
+  return { ...body, metadata };
+}
+
+function claudeOauthSourceFile(plugin: Record<string, unknown>): string | undefined {
+  const oauth = isRecord(plugin.claudeOauth) ? plugin.claudeOauth : undefined;
+  return stringValue(oauth?.sourceFile) ||
+    stringValue(oauth?.source_file) ||
+    originalAuthHeader(plugin, claudeOauthSourceHeader);
 }
 
 async function resolveLiveGrokAccessToken(plugin: Record<string, unknown>): Promise<string | undefined> {

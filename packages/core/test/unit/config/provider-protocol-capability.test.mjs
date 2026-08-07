@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("provider parsing preserves credential session affinity", async () => {
+  const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
+  const providers = parseProvidersForTest([{
+    credentialSessionAffinity: true,
+    models: ["claude-opus-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  }]);
+
+  assert.equal(providers?.[0]?.credentialSessionAffinity, true);
+});
+
 test("top-level provider protocol becomes a capability when none are configured", async () => {
   const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
   const providers = parseProvidersForTest([

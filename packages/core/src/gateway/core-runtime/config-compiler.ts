@@ -54,7 +54,7 @@ export async function compileCoreGatewayConfig(
     config.Providers.filter(isGatewayProviderEnabled)
   );
   const providerPluginsWithRuntimeDefaults = await withKimiOauthRuntimeDefaults(
-    await withGrokOauthRuntimeDefaults(withClaudeCodeOauthRuntimeDefaults(withCodexOauthRuntimeDefaults(configuredProviderPluginsWithLocalCodexFallbacks)))
+    await withGrokOauthRuntimeDefaults(await withClaudeCodeOauthRuntimeDefaults(withCodexOauthRuntimeDefaults(configuredProviderPluginsWithLocalCodexFallbacks)))
   );
   const codexOauthProviderNames = codexOauthLocalProviderNames(providerPluginsWithRuntimeDefaults);
   const enabledProviders = config.Providers.filter(isGatewayProviderEnabled);
@@ -491,19 +491,21 @@ function withCodexOauthRuntimeDefaults(providerPlugins: unknown[]): unknown[] {
 }
 
 
-function withClaudeCodeOauthRuntimeDefaults(providerPlugins: unknown[]): unknown[] {
+async function withClaudeCodeOauthRuntimeDefaults(providerPlugins: unknown[]): Promise<unknown[]> {
   if (!providerPlugins.some(isLocalClaudeCodeOauthProviderPlugin)) {
     return providerPlugins;
   }
-  const oauth = readClaudeCodeOauth();
-  if (!oauth?.accessToken) {
-    return providerPlugins;
-  }
-
-  return providerPlugins.map((plugin) => {
+  return Promise.all(providerPlugins.map(async (plugin) => {
     if (!isLocalClaudeCodeOauthProviderPlugin(plugin)) {
       return plugin;
     }
+    const source = isRecord(plugin.claudeOauth) ? plugin.claudeOauth : undefined;
+    const sourceFile = stringValue(source?.sourceFile) || stringValue(source?.source_file);
+    // File-backed pools resolve lazily in the provider hook. One stale account
+    // must not prevent the whole gateway from compiling or starting.
+    if (sourceFile) return plugin;
+    const oauth = readClaudeCodeOauth();
+    if (!oauth?.accessToken) return plugin;
     const currentAuth = isRecord(plugin.auth) ? plugin.auth : {};
     const currentHeaders = isRecord(currentAuth.headers) ? currentAuth.headers : {};
     return {
@@ -516,7 +518,7 @@ function withClaudeCodeOauthRuntimeDefaults(providerPlugins: unknown[]): unknown
         }
       }
     };
-  });
+  }));
 }
 
 

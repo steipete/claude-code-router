@@ -1385,6 +1385,7 @@ function parseProviders(value: unknown): GatewayProviderConfig[] | undefined {
         capabilities: parseProviderCapabilities(item.capabilities)
           ?? parseProviderProtocolCapability(item),
         credentials: parseProviderCredentials(item.credentials ?? item.keys ?? item.apiKeys),
+        credentialSessionAffinity: item.credentialSessionAffinity === true ? true : undefined,
         extraBody: item.extraBody,
         extraHeaders: item.extraHeaders,
         icon: readString(item.icon),

@@ -14,6 +14,7 @@ import { importZcodeProvider, zcodeCandidate } from "@ccr/core/agents/local-prov
 
 export { codexDefaultBaseUrl, readCodexAuth } from "@ccr/core/agents/local-providers/codex";
 export { readClaudeCodeOauth } from "@ccr/core/agents/local-providers/claude-code";
+export { readClaudeCodeOauthSource, resolveClaudeCodeOauthSource } from "@ccr/core/agents/local-providers/claude-code-oauth-source";
 export { grokDefaultBaseUrl, readGrokAuth, resolveGrokAuth } from "@ccr/core/agents/local-providers/grok";
 export { kimiAccessTokenExpired, kimiIdentityHeaders, readKimiAuth, resolveKimiAuth } from "@ccr/core/agents/local-providers/kimi";
 export { readZcodeLocalProviderCredential, zcodeDefaultBaseUrl } from "@ccr/core/agents/local-providers/zcode";

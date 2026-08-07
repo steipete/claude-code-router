@@ -2,6 +2,7 @@
  * Extracted from gateway/service.ts. Keep this module focused on its named gateway boundary.
  */
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
 import type { AppConfig, GatewayProviderConfig, GatewayProviderProtocol, ProviderCredentialConfig, RequestRouteTraceChange, RouterFallbackConfig } from "@ccr/core/contracts/app";
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
 import { createRouteExecutionPlan } from "@ccr/core/routing/execution-plan";
@@ -594,7 +595,13 @@ function prepareUpstreamCredentialAttempt(input: {
   }
 
   const usage = estimateLimitUsage(input.method, input.attempt.body ?? Buffer.alloc(0));
-  const selection = selectProviderCredentials(target.provider, target.protocol, credentials, usage);
+  const selection = selectProviderCredentials(
+    target.provider,
+    target.protocol,
+    credentials,
+    usage,
+    target.provider.credentialSessionAffinity ? claudeSessionAffinityKey(input.headers) : undefined
+  );
   if (selection.credentials.length === 0) {
     const preserveModelSelector = shouldPreserveCapabilityModelSelector(input.attempt.body, target);
     return {
@@ -912,7 +919,8 @@ function selectProviderCredentials(
   provider: GatewayProviderConfig,
   protocol: GatewayProviderProtocol,
   credentials: ProviderCredentialConfig[],
-  usage: ApiKeyLimitUsage
+  usage: ApiKeyLimitUsage,
+  affinityKey?: string
 ): { credentials: Array<{ credential: ProviderCredentialConfig; credentialId: string; internalName: string }>; saturated: boolean } {
   const candidates = credentials.map((credential, index) => {
     const providerIndex = provider.credentials?.indexOf(credential) ?? index;
@@ -931,14 +939,36 @@ function selectProviderCredentials(
   });
   const available = candidates.filter((candidate) => !candidate.cooldown && !candidate.limitState.blocked);
   const sorted = sortProviderCredentialCandidates(available.length > 0 ? available : candidates);
+  const affinitySorted = affinityKey ? withAffinityPrimary(sorted, affinityKey) : sorted;
   return {
-    credentials: sorted.map((candidate) => ({
+    credentials: affinitySorted.map((candidate) => ({
       credential: candidate.credential,
       credentialId: candidate.credentialId,
       internalName: candidate.internalName
     })),
     saturated: available.length === 0 && candidates.length > 0
   };
+}
+
+function claudeSessionAffinityKey(headers: Record<string, string>): string | undefined {
+  return Object.entries(headers)
+    .find(([name]) => name.trim().toLowerCase() === "x-claude-code-session-id")?.[1]
+    ?.trim() || undefined;
+}
+
+function withAffinityPrimary<T extends { credentialId: string; priority: number }>(candidates: T[], affinityKey: string): T[] {
+  const primaryPriority = candidates[0]?.priority;
+  if (primaryPriority === undefined) return candidates;
+  const primary = candidates.filter((candidate) => candidate.priority === primaryPriority);
+  if (primary.length < 2) return candidates;
+  const selected = [...primary].sort((left, right) =>
+    affinityScore(affinityKey, right.credentialId).localeCompare(affinityScore(affinityKey, left.credentialId))
+  )[0];
+  return selected ? [selected, ...candidates.filter((candidate) => candidate !== selected)] : candidates;
+}
+
+function affinityScore(affinityKey: string, credentialId: string): string {
+  return createHash("sha256").update(affinityKey).update("\0").update(credentialId).digest("hex");
 }
 
 
