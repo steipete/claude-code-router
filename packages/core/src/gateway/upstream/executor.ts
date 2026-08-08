@@ -1044,12 +1044,13 @@ export function selectSubscriptionFirstCredentialLane<T>(
   if (paid.length === 0 || paid.some((candidate) => candidate.state === "unknown")) {
     return { credentials: [], lane: "quota-blocked" };
   }
-  const paidSubscription = paid.filter((candidate) => candidate.state === "available");
+  const eligiblePaid = paid.filter((candidate) => candidate.state !== "unavailable");
+  const paidSubscription = eligiblePaid.filter((candidate) => candidate.state === "available");
   if (paidSubscription.length > 0) {
     return { credentials: paidSubscription.map((candidate) => candidate.credential), lane: "paid-subscription" };
   }
-  const paidFallback = paid.filter((candidate) => candidate.state === "exhausted");
-  return paidFallback.length === paid.length
+  const paidFallback = eligiblePaid.filter((candidate) => candidate.state === "exhausted");
+  return paidFallback.length > 0
     ? { credentials: paidFallback.map((candidate) => candidate.credential), lane: "paid-fallback" }
     : { credentials: [], lane: "quota-blocked" };
 }

@@ -111,7 +111,7 @@ const codexOauthCache = new Map<string, CodexOauthRefreshResult>();
 const inFlightRefreshes = new Map<string, Promise<ProviderAccountSnapshot | undefined>>();
 let cacheGeneration = 0;
 
-export type ProviderAccountRoutingState = "available" | "exhausted" | "unknown";
+export type ProviderAccountRoutingState = "available" | "exhausted" | "unavailable" | "unknown";
 
 export function readProviderAccountRoutingState(
   config: AppConfig,
@@ -144,13 +144,11 @@ export function classifyProviderAccountRoutingSnapshot(
   routing: ProviderAccountRoutingConfig,
   model?: string
 ): ProviderAccountRoutingState {
-  if (
-    !snapshot ||
-    snapshot.errors?.length ||
-    snapshot.status === "error" ||
-    snapshot.status === "unsupported"
-  ) {
+  if (!snapshot) {
     return "unknown";
+  }
+  if (snapshot.errors?.length || snapshot.status === "error" || snapshot.status === "unsupported") {
+    return "unavailable";
   }
 
   const normalizedModel = model?.trim().toLowerCase();
@@ -158,11 +156,11 @@ export function classifyProviderAccountRoutingSnapshot(
     !requirement.models?.length ||
     Boolean(normalizedModel && requirement.models.some((candidate) => candidate.trim().toLowerCase() === normalizedModel))
   );
-  let hasUnknownMeter = false;
+  let hasUnavailableMeter = false;
   for (const requirement of requirements) {
     const meter = snapshot.meters.find((candidate) => candidate.id === requirement.id);
     if (!meter) {
-      hasUnknownMeter = true;
+      hasUnavailableMeter = true;
       continue;
     }
     const remaining = meter.remaining === undefined
@@ -172,14 +170,14 @@ export function classifyProviderAccountRoutingSnapshot(
       : meter.remaining;
     const minimumRemaining = requirement.minimumRemaining ?? 0;
     if (!Number.isFinite(remaining) || !Number.isFinite(minimumRemaining)) {
-      hasUnknownMeter = true;
+      hasUnavailableMeter = true;
       continue;
     }
     if ((remaining as number) <= minimumRemaining) {
       return "exhausted";
     }
   }
-  return hasUnknownMeter ? "unknown" : "available";
+  return hasUnavailableMeter ? "unavailable" : "available";
 }
 
 export async function getProviderAccountSnapshots(

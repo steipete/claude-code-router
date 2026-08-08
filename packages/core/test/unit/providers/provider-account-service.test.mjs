@@ -48,7 +48,11 @@ test("subscription routing applies model-scoped meters to exact normalized model
   ]);
 
   assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, "claude-sonnet-5"), "available");
-  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, " CLAUDE-FABLE-5 "), "unknown");
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, " CLAUDE-FABLE-5 "), "unavailable");
+});
+
+test("subscription routing treats an absent authoritative snapshot as unknown", () => {
+  assert.equal(classifyProviderAccountRoutingSnapshot(undefined, subscriptionFirstRouting, "claude-fable-5"), "unknown");
 });
 
 test("subscription routing requires every applicable meter and honors minimum remaining", () => {
@@ -61,7 +65,7 @@ test("subscription routing requires every applicable meter and honors minimum re
   };
   assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
     { id: "session", kind: "quota", label: "Session", remaining: 3, unit: "requests" }
-  ]), routing, "claude-fable-5"), "unknown");
+  ]), routing, "claude-fable-5"), "unavailable");
   assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
     { id: "session", kind: "quota", label: "Session", remaining: 2, unit: "requests" }
   ]), routing, "claude-fable-5"), "exhausted");
@@ -71,19 +75,20 @@ test("subscription routing requires every applicable meter and honors minimum re
   ]), routing, "claude-fable-5"), "available");
 });
 
-test("subscription routing treats connector and nonfinite meter data as unknown", () => {
+test("subscription routing treats fresh connector, missing, and nonfinite meter data as unavailable", () => {
   const routing = {
     ...subscriptionFirstRouting,
     requiredMeters: [{ id: "session" }]
   };
   const meter = { id: "session", kind: "quota", label: "Session", remaining: Number.NaN, unit: "requests" };
-  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([meter]), routing), "unknown");
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([meter]), routing), "unavailable");
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([], { status: "critical" }), routing), "unavailable");
   assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
     { ...meter, remaining: 10 }
   ], {
     errors: [{ message: "connector failed", source: "http-json" }],
     status: "warning"
-  }), routing), "unknown");
+  }), routing), "unavailable");
 });
 
 test("Grok billing connector maps credit usage payload", async (t) => {

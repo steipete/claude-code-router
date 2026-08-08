@@ -67,6 +67,46 @@ test("subscription-first lane fails closed for unknown paid credentials before e
   });
 });
 
+test("subscription-first lane excludes unavailable subscriptions", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("unavailable-subscription", "subscription", "unavailable"),
+    laneCandidate("paid", "paid-fallback", "exhausted")
+  ]), {
+    credentials: ["paid"],
+    lane: "paid-fallback"
+  });
+});
+
+test("subscription-first lane skips unavailable paid credentials without blocking known paid lanes", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("subscription", "subscription", "exhausted"),
+    laneCandidate("unavailable-paid", "paid-fallback", "unavailable"),
+    laneCandidate("paid-with-quota", "paid-fallback", "available")
+  ]), {
+    credentials: ["paid-with-quota"],
+    lane: "paid-subscription"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("subscription", "subscription", "exhausted"),
+    laneCandidate("unavailable-paid", "paid-fallback", "unavailable"),
+    laneCandidate("paid", "paid-fallback", "exhausted")
+  ]), {
+    credentials: ["paid"],
+    lane: "paid-fallback"
+  });
+});
+
+test("subscription-first lane blocks when every paid credential is unavailable", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("subscription", "subscription", "exhausted"),
+    laneCandidate("paid-a", "paid-fallback", "unavailable"),
+    laneCandidate("paid-b", "paid-fallback", "unavailable")
+  ]), {
+    credentials: [],
+    lane: "quota-blocked"
+  });
+});
+
 test("subscription-first lane selects paid fallback only when every credential is freshly exhausted", () => {
   assert.deepEqual(selectSubscriptionFirstCredentialLane([
     laneCandidate("subscription-a", "subscription", "exhausted"),
