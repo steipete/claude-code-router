@@ -4,6 +4,36 @@ import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
 import { mediaToolsConfigFromRawForTest, virtualModelProfileFromRawForTest } from "@ccr/core/config/config.ts";
 import { shouldRestartGatewayForRuntimeConfigChange } from "@ccr/core/gateway/runtime-change.ts";
 
+function createProviderRuntimeConfig() {
+  const config = createDefaultAppConfig();
+  config.Providers = [{
+    account: {
+      connectors: [{ auth: "provider-api-key", endpoint: "https://provider.example/account", type: "standard" }],
+      enabled: true,
+      refreshIntervalMs: 60_000
+    },
+    baseUrl: "https://provider.example/v1",
+    credentials: [{
+      account: {
+        connectors: [{ auth: "provider-api-key", endpoint: "https://provider.example/credential/account", type: "standard" }],
+        enabled: true,
+        refreshIntervalMs: 60_000
+      },
+      apiKey: "credential-key",
+      enabled: true,
+      id: "primary",
+      limits: { rpm: 60 },
+      priority: 1,
+      weight: 1
+    }],
+    enabled: true,
+    models: ["model-a"],
+    name: "Provider",
+    type: "openai_chat_completions"
+  }];
+  return config;
+}
+
 test("ToolHub config changes restart the gateway runtime", () => {
   const previous = createDefaultAppConfig();
   const next = createDefaultAppConfig();
@@ -115,4 +145,53 @@ test("main-process-only observability changes do not restart the gateway runtime
   next.observability.requestLogSuccessSampleRate = 0.25;
 
   assert.equal(shouldRestartGatewayForRuntimeConfigChange(previous, next), false);
+});
+
+test("provider account management changes do not restart the gateway runtime", () => {
+  const mutations = [
+    ["connector", (provider) => { provider.account.connectors[0].endpoint = "https://provider.example/new-account"; }],
+    ["enabled", (provider) => { provider.account.enabled = false; }],
+    ["refresh interval", (provider) => { provider.account.refreshIntervalMs = 120_000; }]
+  ];
+
+  for (const [name, mutate] of mutations) {
+    const previous = createProviderRuntimeConfig();
+    const next = structuredClone(previous);
+    mutate(next.Providers[0]);
+    const previousProviders = structuredClone(previous.Providers);
+    const nextProviders = structuredClone(next.Providers);
+
+    assert.equal(shouldRestartGatewayForRuntimeConfigChange(previous, next), false, name);
+    assert.deepEqual(previous.Providers, previousProviders, `${name} mutated the previous config`);
+    assert.deepEqual(next.Providers, nextProviders, `${name} mutated the next config`);
+  }
+});
+
+test("credential account connector changes do not restart the gateway runtime", () => {
+  const previous = createProviderRuntimeConfig();
+  const next = structuredClone(previous);
+  next.Providers[0].credentials[0].account.connectors[0].endpoint = "https://provider.example/new-credential-account";
+
+  assert.equal(shouldRestartGatewayForRuntimeConfigChange(previous, next), false);
+});
+
+test("provider routing changes restart the gateway runtime", () => {
+  const mutations = [
+    ["model", (provider) => { provider.models = ["model-b"]; }],
+    ["endpoint", (provider) => { provider.baseUrl = "https://provider.example/v2"; }],
+    ["enabled", (provider) => { provider.enabled = false; }],
+    ["credential key", (provider) => { provider.credentials[0].apiKey = "new-key"; }],
+    ["credential id", (provider) => { provider.credentials[0].id = "secondary"; }],
+    ["credential priority", (provider) => { provider.credentials[0].priority = 2; }],
+    ["credential weight", (provider) => { provider.credentials[0].weight = 2; }],
+    ["credential limits", (provider) => { provider.credentials[0].limits = { rpm: 120 }; }]
+  ];
+
+  for (const [name, mutate] of mutations) {
+    const previous = createProviderRuntimeConfig();
+    const next = structuredClone(previous);
+    mutate(next.Providers[0]);
+
+    assert.equal(shouldRestartGatewayForRuntimeConfigChange(previous, next), true, name);
+  }
 });
