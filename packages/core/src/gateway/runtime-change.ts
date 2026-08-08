@@ -1,5 +1,21 @@
 import type { AppConfig } from "@ccr/core/contracts/app";
 
+function normalizeProvidersForRestartComparison(providers: AppConfig["Providers"]): AppConfig["Providers"] {
+  return providers.map((provider) => {
+    const normalizedProvider = { ...provider };
+    // Account connectors are consumed by management services, not the gateway runtime.
+    delete normalizedProvider.account;
+    if (provider.credentials) {
+      normalizedProvider.credentials = provider.credentials.map((credential) => {
+        const normalizedCredential = { ...credential };
+        delete normalizedCredential.account;
+        return normalizedCredential;
+      });
+    }
+    return normalizedProvider;
+  });
+}
+
 export function shouldRestartGatewayForRuntimeConfigChange(previousConfig: AppConfig, nextConfig: AppConfig): boolean {
   return (
     previousConfig.gateway.enabled !== nextConfig.gateway.enabled ||
@@ -20,7 +36,7 @@ export function shouldRestartGatewayForRuntimeConfigChange(previousConfig: AppCo
     JSON.stringify(previousConfig.proxy.upstream) !== JSON.stringify(nextConfig.proxy.upstream) ||
     JSON.stringify(previousConfig.agent) !== JSON.stringify(nextConfig.agent) ||
     JSON.stringify(previousConfig.mediaTools) !== JSON.stringify(nextConfig.mediaTools) ||
-    JSON.stringify(previousConfig.Providers) !== JSON.stringify(nextConfig.Providers) ||
+    JSON.stringify(normalizeProvidersForRestartComparison(previousConfig.Providers)) !== JSON.stringify(normalizeProvidersForRestartComparison(nextConfig.Providers)) ||
     JSON.stringify(previousConfig.plugins) !== JSON.stringify(nextConfig.plugins) ||
     JSON.stringify(previousConfig.providerPlugins) !== JSON.stringify(nextConfig.providerPlugins) ||
     JSON.stringify(previousConfig.toolHub) !== JSON.stringify(nextConfig.toolHub) ||
