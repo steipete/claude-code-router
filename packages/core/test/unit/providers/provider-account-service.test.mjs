@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  classifyProviderAccountRoutingSnapshot,
   localAgentProviderAccountCredentialForTest,
   localCodexAccountCredentialForTest,
   testProviderAccountConnector
@@ -18,6 +19,72 @@ import {
 const localAgentProviderApiKey = "ccr-local-agent-login";
 const codexDefaultBaseUrl = "https://chatgpt.com/backend-api/codex";
 const zcodeDefaultBaseUrl = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
+
+function routingSnapshot(meters, overrides = {}) {
+  return {
+    meters,
+    provider: "Test Pool",
+    source: "http-json",
+    status: "ok",
+    updatedAt: new Date().toISOString(),
+    ...overrides
+  };
+}
+
+const subscriptionFirstRouting = {
+  billingMode: "subscription",
+  mode: "subscription-first",
+  requiredMeters: [
+    { id: "session" },
+    { id: "weekly" },
+    { id: "scoped_weekly", models: ["claude-fable-5"] }
+  ]
+};
+
+test("subscription routing applies model-scoped meters to exact normalized model IDs", () => {
+  const snapshot = routingSnapshot([
+    { id: "session", kind: "quota", label: "Session", remaining: 10, unit: "requests" },
+    { id: "weekly", kind: "quota", label: "Weekly", remaining: 10, unit: "requests" }
+  ]);
+
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, "claude-sonnet-5"), "available");
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, " CLAUDE-FABLE-5 "), "unknown");
+});
+
+test("subscription routing requires every applicable meter and honors minimum remaining", () => {
+  const routing = {
+    ...subscriptionFirstRouting,
+    requiredMeters: [
+      { id: "session", minimumRemaining: 2 },
+      { id: "weekly" }
+    ]
+  };
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
+    { id: "session", kind: "quota", label: "Session", remaining: 3, unit: "requests" }
+  ]), routing, "claude-fable-5"), "unknown");
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
+    { id: "session", kind: "quota", label: "Session", remaining: 2, unit: "requests" }
+  ]), routing, "claude-fable-5"), "exhausted");
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
+    { id: "session", kind: "quota", label: "Session", limit: 10, unit: "requests", used: 7 },
+    { id: "weekly", kind: "quota", label: "Weekly", remaining: 1, unit: "requests" }
+  ]), routing, "claude-fable-5"), "available");
+});
+
+test("subscription routing treats connector and nonfinite meter data as unknown", () => {
+  const routing = {
+    ...subscriptionFirstRouting,
+    requiredMeters: [{ id: "session" }]
+  };
+  const meter = { id: "session", kind: "quota", label: "Session", remaining: Number.NaN, unit: "requests" };
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([meter]), routing), "unknown");
+  assert.equal(classifyProviderAccountRoutingSnapshot(routingSnapshot([
+    { ...meter, remaining: 10 }
+  ], {
+    errors: [{ message: "connector failed", source: "http-json" }],
+    status: "warning"
+  }), routing), "unknown");
+});
 
 test("Grok billing connector maps credit usage payload", async (t) => {
   const previousFetch = globalThis.fetch;

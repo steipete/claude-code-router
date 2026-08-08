@@ -41,6 +41,7 @@ import type {
   ProviderAccountMeterKind,
   ProviderAccountMeterUnit,
   ProviderAccountPluginConnectorConfig,
+  ProviderAccountRoutingConfig,
   ProviderAccountSnapshot,
   ProviderAccountSnapshotRequestOptions,
   ProviderAccountResetRequest,
@@ -109,6 +110,77 @@ const cache = new Map<string, CacheEntry>();
 const codexOauthCache = new Map<string, CodexOauthRefreshResult>();
 const inFlightRefreshes = new Map<string, Promise<ProviderAccountSnapshot | undefined>>();
 let cacheGeneration = 0;
+
+export type ProviderAccountRoutingState = "available" | "exhausted" | "unknown";
+
+export function readProviderAccountRoutingState(
+  config: AppConfig,
+  provider: GatewayProviderConfig,
+  credential: ProviderCredentialConfig,
+  model?: string
+): ProviderAccountRoutingState {
+  const inheritedAccount = effectiveProviderAccount(provider);
+  const account = effectiveProviderCredentialAccount(provider, credential, inheritedAccount);
+  if (!account?.routing || account.routing.mode !== "subscription-first") {
+    return "unknown";
+  }
+
+  const materializedProvider = providerWithCredentialApiKey(provider, credential, account);
+  const cacheKey = providerAccountCacheKey(materializedProvider, account, credential);
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return classifyProviderAccountRoutingSnapshot(cached.snapshot, account.routing, model);
+  }
+
+  if (!inFlightRefreshes.has(cacheKey)) {
+    const refreshIntervalMs = normalizeRefreshInterval(account.refreshIntervalMs);
+    void startProviderAccountRefresh(config, materializedProvider, account, credential, cacheKey, refreshIntervalMs);
+  }
+  return "unknown";
+}
+
+export function classifyProviderAccountRoutingSnapshot(
+  snapshot: ProviderAccountSnapshot | undefined,
+  routing: ProviderAccountRoutingConfig,
+  model?: string
+): ProviderAccountRoutingState {
+  if (
+    !snapshot ||
+    snapshot.errors?.length ||
+    snapshot.status === "error" ||
+    snapshot.status === "unsupported"
+  ) {
+    return "unknown";
+  }
+
+  const normalizedModel = model?.trim().toLowerCase();
+  const requirements = routing.requiredMeters.filter((requirement) =>
+    !requirement.models?.length ||
+    Boolean(normalizedModel && requirement.models.some((candidate) => candidate.trim().toLowerCase() === normalizedModel))
+  );
+  let hasUnknownMeter = false;
+  for (const requirement of requirements) {
+    const meter = snapshot.meters.find((candidate) => candidate.id === requirement.id);
+    if (!meter) {
+      hasUnknownMeter = true;
+      continue;
+    }
+    const remaining = meter.remaining === undefined
+      ? Number.isFinite(meter.limit) && Number.isFinite(meter.used)
+        ? (meter.limit as number) - (meter.used as number)
+        : undefined
+      : meter.remaining;
+    const minimumRemaining = requirement.minimumRemaining ?? 0;
+    if (!Number.isFinite(remaining) || !Number.isFinite(minimumRemaining)) {
+      hasUnknownMeter = true;
+      continue;
+    }
+    if ((remaining as number) <= minimumRemaining) {
+      return "exhausted";
+    }
+  }
+  return hasUnknownMeter ? "unknown" : "available";
+}
 
 export async function getProviderAccountSnapshots(
   providerName?: string,
@@ -542,7 +614,8 @@ function effectiveProviderAccountConfig(
   provider: GatewayProviderConfig,
   account: ProviderAccountConfig | undefined
 ): ProviderAccountConfig | undefined {
-  if (!account?.enabled) {
+  // Routing owns its refresh lifecycle even when account display is disabled.
+  if (!account || (!account.enabled && !account.routing)) {
     return undefined;
   }
 
@@ -556,7 +629,8 @@ function effectiveProviderAccountConfig(
   }
   return {
     ...presetAccount,
-    refreshIntervalMs: account.refreshIntervalMs ?? presetAccount.refreshIntervalMs
+    refreshIntervalMs: account.refreshIntervalMs ?? presetAccount.refreshIntervalMs,
+    routing: account.routing ?? presetAccount.routing
   };
 }
 

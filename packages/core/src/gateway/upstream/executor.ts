@@ -12,6 +12,7 @@ import { requestProtocolForPath } from "@ccr/core/routing/protocol-endpoints";
 import { resolveConfiguredProviderModelSelector, resolveUniqueConfiguredProviderModelSelector } from "@ccr/core/routing/model-resolution";
 import { estimateLimitUsage } from "@ccr/core/gateway/limits/window-limiter";
 import { providerCredentialLimitState, readProviderCredentialCooldown, recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
+import { readProviderAccountRoutingState, type ProviderAccountRoutingState } from "@ccr/core/providers/account-service";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
 import { abortSignalMessage, formatError, omitLocalObservabilityHeaders, shouldSendBody, withCoreGatewayAuthHeader } from "@ccr/core/gateway/http/io";
@@ -25,6 +26,7 @@ import type { ApiKeyLimitUsage, ProviderCredentialRoutingTarget, UpstreamAttempt
 import type { RouteTraceObserver } from "@ccr/core/observability/route-trace";
 
 const providerCredentialSpilloverThreshold = 0.8;
+const providerCredentialQuotaLaneHeader = "x-ccr-provider-credential-quota-lane";
 
 
 export function applyProviderCapabilityRouting(input: {
@@ -422,6 +424,14 @@ export async function fetchUpstreamWithFallback(input: {
       kind: "attempt",
       name: "upstream.attempt.prepare",
       phase: "attempt",
+      ...(attempt.headers?.[providerCredentialQuotaLaneHeader]
+        ? {
+            decision: {
+              reason: attempt.headers[providerCredentialQuotaLaneHeader],
+              source: "provider-account-routing"
+            }
+          }
+        : {}),
       startedAtMs: attemptPreparationStartedAt,
       target: {
         ...(attempt.credentialIds?.[0] ? { credentialId: attempt.credentialIds[0] } : {}),
@@ -435,6 +445,20 @@ export async function fetchUpstreamWithFallback(input: {
     releaseJsonObject(attempt.body);
     releaseJsonObject(attemptSourceBody);
     releaseJsonObject(input.body);
+
+    if (attempt.headers?.[providerCredentialQuotaLaneHeader] === "quota-blocked") {
+      return {
+        attempt,
+        failedAttempts,
+        response: new Response(JSON.stringify({ error: "No credential is currently eligible under the provider account routing policy." }), {
+          headers: {
+            "content-type": "application/json",
+            [providerCredentialQuotaLaneHeader]: "quota-blocked"
+          },
+          status: 503
+        })
+      };
+    }
 
     try {
       const response = await fetchWithSystemProxy(attemptUrl, {
@@ -596,14 +620,30 @@ function prepareUpstreamCredentialAttempt(input: {
 
   const usage = estimateLimitUsage(input.method, input.attempt.body ?? Buffer.alloc(0));
   const selection = selectProviderCredentials(
+    input.config,
     target.provider,
     target.protocol,
     credentials,
     usage,
+    target.model,
     target.provider.credentialSessionAffinity ? claudeSessionAffinityKey(input.headers) : undefined
   );
   if (selection.credentials.length === 0) {
     const preserveModelSelector = shouldPreserveCapabilityModelSelector(input.attempt.body, target);
+    if (selection.lane === "quota-blocked") {
+      const headers = clearTargetProviderHeaders(attemptHeaders);
+      headers[providerCredentialQuotaLaneHeader] = selection.lane;
+      headers["x-ccr-logical-provider"] = providerRuntimeId(target.provider);
+      return {
+        ...input.attempt,
+        body: attemptBody(preserveModelSelector ? input.attempt.body : target.body ?? normalizedBody?.body ?? input.attempt.body),
+        credentialChain: [],
+        credentialIds: [],
+        credentialProtocol: target.protocol,
+        headers,
+        logicalProvider: target.provider.name
+      };
+    }
     return {
       ...input.attempt,
       body: attemptBody(preserveModelSelector ? input.attempt.body : target.body ?? normalizedBody?.body ?? input.attempt.body),
@@ -619,6 +659,9 @@ function prepareUpstreamCredentialAttempt(input: {
     "x-ccr-logical-provider": providerRuntimeId(target.provider),
     "x-ccr-provider-credential-chain": selection.credentials.map((candidate) => candidate.credentialId).join(",")
   };
+  if (selection.lane) {
+    headers[providerCredentialQuotaLaneHeader] = selection.lane;
+  }
   delete headers["x-target-provider"];
   if (selection.saturated) {
     headers["x-ccr-provider-credential-saturated"] = "true";
@@ -931,13 +974,25 @@ function firstTargetProviderHeader(headers: Record<string, string>): string | un
 
 
 function selectProviderCredentials(
+  config: AppConfig,
   provider: GatewayProviderConfig,
   protocol: GatewayProviderProtocol,
   credentials: ProviderCredentialConfig[],
   usage: ApiKeyLimitUsage,
+  model?: string,
   affinityKey?: string
-): { credentials: Array<{ credential: ProviderCredentialConfig; credentialId: string; internalName: string }>; saturated: boolean } {
-  const candidates = credentials.map((credential, index) => {
+): {
+  credentials: Array<{ credential: ProviderCredentialConfig; credentialId: string; internalName: string }>;
+  lane?: ProviderCredentialQuotaLane;
+  saturated: boolean;
+} {
+  const routedCredentials = quotaRoutedProviderCredentials(config, provider, credentials, model);
+  const selectedCredentials = routedCredentials?.credentials ?? credentials;
+  if (routedCredentials?.lane === "quota-blocked") {
+    return { credentials: [], lane: routedCredentials.lane, saturated: false };
+  }
+  const candidates = selectedCredentials.map((credential, selectedIndex) => {
+    const index = routedCredentials ? credentials.indexOf(credential) : selectedIndex;
     const providerIndex = provider.credentials?.indexOf(credential) ?? index;
     const limitState = providerCredentialLimitState(provider, credential, usage);
     const cooldown = readProviderCredentialCooldown(provider, credential);
@@ -961,8 +1016,56 @@ function selectProviderCredentials(
       credentialId: candidate.credentialId,
       internalName: candidate.internalName
     })),
+    lane: routedCredentials?.lane,
     saturated: available.length === 0 && candidates.length > 0
   };
+}
+
+type ProviderCredentialQuotaLane = "subscription" | "paid-fallback" | "quota-blocked";
+
+type SubscriptionFirstCredentialCandidate<T> = {
+  billingMode: "subscription" | "paid-fallback";
+  credential: T;
+  state: ProviderAccountRoutingState;
+};
+
+export function selectSubscriptionFirstCredentialLane<T>(
+  candidates: SubscriptionFirstCredentialCandidate<T>[]
+): { credentials: T[]; lane: ProviderCredentialQuotaLane } {
+  const free = candidates.filter((candidate) =>
+    candidate.state === "available" ||
+    (candidate.billingMode === "subscription" && candidate.state === "unknown")
+  );
+  if (free.length > 0) {
+    return { credentials: free.map((candidate) => candidate.credential), lane: "subscription" };
+  }
+
+  const paidFallback = candidates.filter((candidate) =>
+    candidate.billingMode === "paid-fallback" && candidate.state === "exhausted"
+  );
+  return paidFallback.length > 0
+    ? { credentials: paidFallback.map((candidate) => candidate.credential), lane: "paid-fallback" }
+    : { credentials: [], lane: "quota-blocked" };
+}
+
+function quotaRoutedProviderCredentials(
+  config: AppConfig,
+  provider: GatewayProviderConfig,
+  credentials: ProviderCredentialConfig[],
+  model?: string
+): { credentials: ProviderCredentialConfig[]; lane: ProviderCredentialQuotaLane } | undefined {
+  const configured = credentials.flatMap((credential) => {
+    const account = credential.account === undefined ? provider.account : credential.account;
+    const routing = account?.routing;
+    return routing?.mode === "subscription-first"
+      ? [{
+          billingMode: routing.billingMode,
+          credential,
+          state: readProviderAccountRoutingState(config, provider, credential, model)
+        }]
+      : [];
+  });
+  return configured.length > 0 ? selectSubscriptionFirstCredentialLane(configured) : undefined;
 }
 
 function claudeSessionAffinityKey(headers: Record<string, string>): string | undefined {
@@ -1120,7 +1223,8 @@ export function destroyResponseStreams(streams: Readable[]): void {
 export function mergeFallbackResponseHeaders(headers: Headers, result: UpstreamFetchResult): Headers {
   const credentialIds = result.attempt.credentialIds ?? [];
   const credentialSaturated = result.attempt.headers?.["x-ccr-provider-credential-saturated"] === "true";
-  if (result.failedAttempts.length === 0 && credentialIds.length === 0 && !credentialSaturated) {
+  const credentialQuotaLane = result.attempt.headers?.[providerCredentialQuotaLaneHeader];
+  if (result.failedAttempts.length === 0 && credentialIds.length === 0 && !credentialSaturated && !credentialQuotaLane) {
     return headers;
   }
 
@@ -1140,6 +1244,9 @@ export function mergeFallbackResponseHeaders(headers: Headers, result: UpstreamF
   }
   if (credentialSaturated) {
     merged.set("x-ccr-provider-credential-saturated", "true");
+  }
+  if (credentialQuotaLane) {
+    merged.set(providerCredentialQuotaLaneHeader, credentialQuotaLane);
   }
   return merged;
 }

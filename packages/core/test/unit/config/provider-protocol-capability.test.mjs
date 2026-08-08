@@ -13,6 +13,30 @@ test("provider parsing preserves credential session affinity", async () => {
   assert.equal(providers?.[0]?.credentialSessionAffinity, true);
 });
 
+test("provider parsing preserves generic subscription-first credential routing", async () => {
+  const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
+  const routing = {
+    billingMode: "paid-fallback",
+    mode: "subscription-first",
+    requiredMeters: [
+      { id: "session" },
+      { id: "scoped_weekly", minimumRemaining: 1, models: ["claude-fable-5"] }
+    ]
+  };
+  const providers = parseProvidersForTest([{
+    credentials: [{
+      account: { enabled: true, routing },
+      apiKey: "synthetic-key",
+      id: "paid"
+    }],
+    models: ["claude-fable-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  }]);
+
+  assert.deepEqual(providers?.[0]?.credentials?.[0]?.account?.routing, routing);
+});
+
 test("top-level provider protocol becomes a capability when none are configured", async () => {
   const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
   const providers = parseProvidersForTest([

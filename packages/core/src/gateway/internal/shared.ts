@@ -266,6 +266,7 @@ export const localObservabilityHeaderNames = new Set([
   "x-ccr-cursor-openai-compat",
   "x-ccr-logical-provider",
   "x-ccr-provider-credential-chain",
+  "x-ccr-provider-credential-quota-lane",
   "x-ccr-provider-credential-saturated"
 ]);
 

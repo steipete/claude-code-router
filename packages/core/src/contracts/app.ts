@@ -250,6 +250,19 @@ export type ProviderAccountConfig = {
   connectors?: ProviderAccountConnectorConfig[];
   enabled?: boolean;
   refreshIntervalMs?: number;
+  routing?: ProviderAccountRoutingConfig;
+};
+
+export type ProviderAccountRoutingConfig = {
+  billingMode: "subscription" | "paid-fallback";
+  mode: "subscription-first";
+  requiredMeters: ProviderAccountRoutingMeterRequirement[];
+};
+
+export type ProviderAccountRoutingMeterRequirement = {
+  id: string;
+  minimumRemaining?: number;
+  models?: string[];
 };
 
 export type ProviderAccountConnectorConfig =

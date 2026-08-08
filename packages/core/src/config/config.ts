@@ -1653,15 +1653,58 @@ function parseProviderAccount(value: unknown): ProviderAccountConfig | undefined
       .filter((connector): connector is Record<string, unknown> => isObject(connector))
       .map((connector) => ({ ...connector }) as ProviderAccountConnectorConfig)
     : undefined;
+  const routing = parseProviderAccountRouting(value.routing);
 
-  if (typeof value.enabled !== "boolean" && !refreshIntervalMs && !connectors?.length) {
+  if (typeof value.enabled !== "boolean" && !refreshIntervalMs && !connectors?.length && !routing) {
     return undefined;
   }
 
   return {
     connectors,
     enabled: typeof value.enabled === "boolean" ? value.enabled : undefined,
-    refreshIntervalMs: refreshIntervalMs && refreshIntervalMs > 0 ? refreshIntervalMs : undefined
+    refreshIntervalMs: refreshIntervalMs && refreshIntervalMs > 0 ? refreshIntervalMs : undefined,
+    routing
+  };
+}
+
+function parseProviderAccountRouting(value: unknown): ProviderAccountConfig["routing"] {
+  if (!isObject(value) || value.mode !== "subscription-first") {
+    return undefined;
+  }
+  const billingMode = value.billingMode;
+  if (billingMode !== "subscription" && billingMode !== "paid-fallback") {
+    return undefined;
+  }
+  if (!Array.isArray(value.requiredMeters)) {
+    return undefined;
+  }
+  const requiredMeters = value.requiredMeters
+    .map((item) => {
+      if (!isObject(item)) {
+        return undefined;
+      }
+      const id = readString(item.id);
+      if (!id) {
+        return undefined;
+      }
+      const minimumRemaining = readNumber(item.minimumRemaining);
+      const models = Array.isArray(item.models)
+        ? item.models.map(readString).filter((model): model is string => Boolean(model))
+        : undefined;
+      return {
+        id,
+        ...(minimumRemaining !== undefined ? { minimumRemaining } : {}),
+        ...(models?.length ? { models } : {})
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  if (requiredMeters.length !== value.requiredMeters.length) {
+    return undefined;
+  }
+  return {
+    billingMode,
+    mode: "subscription-first",
+    requiredMeters
   };
 }
 
