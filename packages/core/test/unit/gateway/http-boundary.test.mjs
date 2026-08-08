@@ -82,7 +82,7 @@ test("gateway header forwarding strips hop-by-hop, local auth, and observability
     omitLocalObservabilityHeaders({
       "x-ccr-logical-provider": "Provider",
       "x-ccr-provider-credential-chain": "credential",
-      "x-ccr-provider-credential-quota-lane": "subscription",
+      "x-ccr-provider-credential-quota-lane": "paid-subscription",
       "x-keep": "yes"
     }),
     { "x-keep": "yes" }

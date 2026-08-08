@@ -1021,7 +1021,7 @@ function selectProviderCredentials(
   };
 }
 
-type ProviderCredentialQuotaLane = "subscription" | "paid-fallback" | "quota-blocked";
+type ProviderCredentialQuotaLane = "subscription" | "paid-subscription" | "paid-fallback" | "quota-blocked";
 
 type SubscriptionFirstCredentialCandidate<T> = {
   billingMode: "subscription" | "paid-fallback";
@@ -1032,18 +1032,24 @@ type SubscriptionFirstCredentialCandidate<T> = {
 export function selectSubscriptionFirstCredentialLane<T>(
   candidates: SubscriptionFirstCredentialCandidate<T>[]
 ): { credentials: T[]; lane: ProviderCredentialQuotaLane } {
-  const free = candidates.filter((candidate) =>
-    candidate.state === "available" ||
-    (candidate.billingMode === "subscription" && candidate.state === "unknown")
+  const subscription = candidates.filter((candidate) =>
+    candidate.billingMode === "subscription" &&
+    (candidate.state === "available" || candidate.state === "unknown")
   );
-  if (free.length > 0) {
-    return { credentials: free.map((candidate) => candidate.credential), lane: "subscription" };
+  if (subscription.length > 0) {
+    return { credentials: subscription.map((candidate) => candidate.credential), lane: "subscription" };
   }
 
-  const paidFallback = candidates.filter((candidate) =>
-    candidate.billingMode === "paid-fallback" && candidate.state === "exhausted"
-  );
-  return paidFallback.length > 0
+  const paid = candidates.filter((candidate) => candidate.billingMode === "paid-fallback");
+  if (paid.length === 0 || paid.some((candidate) => candidate.state === "unknown")) {
+    return { credentials: [], lane: "quota-blocked" };
+  }
+  const paidSubscription = paid.filter((candidate) => candidate.state === "available");
+  if (paidSubscription.length > 0) {
+    return { credentials: paidSubscription.map((candidate) => candidate.credential), lane: "paid-subscription" };
+  }
+  const paidFallback = paid.filter((candidate) => candidate.state === "exhausted");
+  return paidFallback.length === paid.length
     ? { credentials: paidFallback.map((candidate) => candidate.credential), lane: "paid-fallback" }
     : { credentials: [], lane: "quota-blocked" };
 }

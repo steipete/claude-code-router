@@ -23,20 +23,11 @@ async function waitFor(predicate, timeoutMs = 2_000) {
   }
 }
 
-test("subscription-first lane treats paid credentials with quota as free", () => {
-  assert.deepEqual(selectSubscriptionFirstCredentialLane([
-    laneCandidate("subscription", "subscription", "exhausted"),
-    laneCandidate("paid-with-quota", "paid-fallback", "available")
-  ]), {
-    credentials: ["paid-with-quota"],
-    lane: "subscription"
-  });
-});
-
-test("subscription-first lane withholds exhausted paid credentials while subscription quota is available or unknown", () => {
+test("subscription-first lane withholds every paid credential while subscription quota is available or unknown", () => {
   for (const subscriptionState of ["available", "unknown"]) {
     assert.deepEqual(selectSubscriptionFirstCredentialLane([
       laneCandidate("subscription", "subscription", subscriptionState),
+      laneCandidate("paid-with-quota", "paid-fallback", "available"),
       laneCandidate("paid", "paid-fallback", "exhausted")
     ]), {
       credentials: ["subscription"],
@@ -45,24 +36,46 @@ test("subscription-first lane withholds exhausted paid credentials while subscri
   }
 });
 
-test("subscription-first lane selects exhausted paid credentials only after subscriptions are exhausted", () => {
+test("subscription-first lane consumes paid included quota only after subscriptions are exhausted", () => {
   assert.deepEqual(selectSubscriptionFirstCredentialLane([
     laneCandidate("subscription-a", "subscription", "exhausted"),
     laneCandidate("subscription-b", "subscription", "exhausted"),
+    laneCandidate("paid-with-quota", "paid-fallback", "available"),
     laneCandidate("paid", "paid-fallback", "exhausted")
   ]), {
-    credentials: ["paid"],
-    lane: "paid-fallback"
+    credentials: ["paid-with-quota"],
+    lane: "paid-subscription"
   });
 });
 
-test("subscription-first lane fails closed for unknown paid credentials", () => {
+test("subscription-first lane fails closed for unknown paid credentials before either paid lane", () => {
   assert.deepEqual(selectSubscriptionFirstCredentialLane([
     laneCandidate("subscription", "subscription", "exhausted"),
+    laneCandidate("paid-with-quota", "paid-fallback", "available"),
     laneCandidate("paid", "paid-fallback", "unknown")
   ]), {
     credentials: [],
     lane: "quota-blocked"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("subscription", "subscription", "exhausted"),
+    laneCandidate("paid", "paid-fallback", "exhausted"),
+    laneCandidate("unknown-paid", "paid-fallback", "unknown")
+  ]), {
+    credentials: [],
+    lane: "quota-blocked"
+  });
+});
+
+test("subscription-first lane selects paid fallback only when every credential is freshly exhausted", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("subscription-a", "subscription", "exhausted"),
+    laneCandidate("subscription-b", "subscription", "exhausted"),
+    laneCandidate("paid-a", "paid-fallback", "exhausted"),
+    laneCandidate("paid-b", "paid-fallback", "exhausted")
+  ]), {
+    credentials: ["paid-a", "paid-b"],
+    lane: "paid-fallback"
   });
 });
 
@@ -224,6 +237,102 @@ test("free-lane cooldown and local-limit saturation never spill to paid fallback
   recordProviderCredentialOutcome(config, "POST", outcomeAttempt, 200, new Headers());
   const locallyBlocked = prepare();
   assert.deepEqual(locallyBlocked.credentialIds, ["subscription"]);
+  assert.equal(locallyBlocked.headers["x-ccr-provider-credential-saturated"], "true");
+});
+
+test("paid-subscription cooldown and local-limit saturation never spill to paid fallback", async (t) => {
+  invalidateProviderAccountSnapshotCache();
+  t.after(() => invalidateProviderAccountSnapshotCache());
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => new Response(JSON.stringify({
+    remaining: String(input).endsWith("/paid-subscription") ? 10 : 0
+  }), {
+    headers: { "content-type": "application/json" },
+    status: 200
+  });
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+  });
+
+  const account = (billingMode, endpoint) => ({
+    connectors: [{
+      endpoint,
+      mapping: {
+        meters: [{ id: "weekly", kind: "quota", label: "Weekly", remaining: "$.remaining", unit: "requests" }]
+      },
+      type: "http-json"
+    }],
+    enabled: true,
+    routing: {
+      billingMode,
+      mode: "subscription-first",
+      requiredMeters: [{ id: "weekly" }]
+    }
+  });
+  const config = {
+    Providers: [{
+      api_base_url: "https://api.anthropic.com",
+      credentials: [
+        {
+          account: account("subscription", "https://quota-paid-lane.example/subscription"),
+          apiKey: "synthetic-subscription-key",
+          id: "subscription"
+        },
+        {
+          account: account("paid-fallback", "https://quota-paid-lane.example/paid-subscription"),
+          apiKey: "synthetic-paid-subscription-key",
+          id: "paid-subscription",
+          limits: { maxRequests: 1, windowMs: 60_000 }
+        },
+        {
+          account: account("paid-fallback", "https://quota-paid-lane.example/paid-fallback"),
+          apiKey: "synthetic-paid-fallback-key",
+          id: "paid-fallback"
+        }
+      ],
+      id: "paid-saturation-pool",
+      models: ["claude-test"],
+      name: "Paid Saturation Pool",
+      type: "anthropic_messages"
+    }],
+    Router: { fallback: { mode: "off", models: [], retryCount: 0 }, rules: [] },
+    gateway: {}
+  };
+  const provider = config.Providers[0];
+  const [subscription, paidSubscription, paidFallback] = provider.credentials;
+  for (const credential of provider.credentials) {
+    readProviderAccountRoutingState(config, provider, credential, "claude-test");
+  }
+  await waitFor(() =>
+    readProviderAccountRoutingState(config, provider, subscription, "claude-test") === "exhausted" &&
+    readProviderAccountRoutingState(config, provider, paidSubscription, "claude-test") === "available" &&
+    readProviderAccountRoutingState(config, provider, paidFallback, "claude-test") === "exhausted"
+  );
+  const prepare = () => prepareGatewayUpstreamAttemptForTest({
+    body: { max_tokens: 8, messages: [], model: "Paid Saturation Pool/claude-test" },
+    config,
+    headers: {},
+    method: "POST",
+    path: "/v1/messages"
+  });
+  const initial = prepare();
+  assert.deepEqual(initial.credentialIds, ["paid-subscription"]);
+  assert.equal(initial.headers["x-ccr-provider-credential-quota-lane"], "paid-subscription");
+
+  const outcomeAttempt = {
+    body: Buffer.from('{"messages":[]}'),
+    credentialChain: initial.credentialChain,
+    credentialProtocol: initial.credentialProtocol,
+    logicalProvider: initial.logicalProvider
+  };
+  recordProviderCredentialOutcome(config, "POST", outcomeAttempt, 503, new Headers());
+  const cooling = prepare();
+  assert.deepEqual(cooling.credentialIds, ["paid-subscription"]);
+  assert.equal(cooling.headers["x-ccr-provider-credential-saturated"], "true");
+
+  recordProviderCredentialOutcome(config, "POST", outcomeAttempt, 200, new Headers());
+  const locallyBlocked = prepare();
+  assert.deepEqual(locallyBlocked.credentialIds, ["paid-subscription"]);
   assert.equal(locallyBlocked.headers["x-ccr-provider-credential-saturated"], "true");
 });
 
