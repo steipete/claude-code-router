@@ -1,5 +1,9 @@
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 
+export const claudeCodeOauthBetaHeader = "anthropic-beta";
+export const claudeCodeOauthRequiredBeta = "oauth-2025-04-20";
+export const claudeCodeOauthUserAgent = "claude-cli/2.1.223 (external, cli)";
+
 export function isLocalClaudeCodeOauthProviderPlugin(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
   const key = stringValue(value.key)?.toLowerCase() ?? "";

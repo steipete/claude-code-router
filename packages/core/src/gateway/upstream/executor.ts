@@ -12,7 +12,7 @@ import { requestProtocolForPath } from "@ccr/core/routing/protocol-endpoints";
 import { resolveConfiguredProviderModelSelector, resolveUniqueConfiguredProviderModelSelector } from "@ccr/core/routing/model-resolution";
 import { estimateLimitUsage } from "@ccr/core/gateway/limits/window-limiter";
 import { providerCredentialLimitState, readProviderCredentialCooldown, recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
-import { readProviderAccountRoutingState, type ProviderAccountRoutingState } from "@ccr/core/providers/account-service";
+import { readProviderAccountRoutingSnapshot, type ProviderAccountRoutingState } from "@ccr/core/providers/account-service";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import { isLocalClaudeCodeOauthProviderPlugin, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
 import { abortSignalMessage, formatError, omitLocalObservabilityHeaders, shouldSendBody, withCoreGatewayAuthHeader } from "@ccr/core/gateway/http/io";
@@ -1024,23 +1024,34 @@ function selectProviderCredentials(
 type ProviderCredentialQuotaLane = "subscription" | "paid-subscription" | "paid-fallback" | "quota-blocked";
 
 type SubscriptionFirstCredentialCandidate<T> = {
-  billingMode: "subscription" | "paid-fallback";
+  billingMode: "auto" | "subscription" | "paid-fallback";
   credential: T;
+  extraUsageEnabled?: boolean;
+  spendLimitReached?: boolean;
   state: ProviderAccountRoutingState;
 };
 
 export function selectSubscriptionFirstCredentialLane<T>(
   candidates: SubscriptionFirstCredentialCandidate<T>[]
 ): { credentials: T[]; lane: ProviderCredentialQuotaLane } {
-  const subscription = candidates.filter((candidate) =>
-    candidate.billingMode === "subscription" &&
-    (candidate.state === "available" || candidate.state === "unknown")
+  const resolved = candidates.map((candidate) => ({
+    ...candidate,
+    // Auto intentionally treats missing billing metadata as paid-capable. An unknown
+    // routing state still blocks the paid lane; explicit subscription-only telemetry
+    // is the sole signal that may place the credential in the free lane.
+    effectiveBillingMode: candidate.billingMode === "auto"
+      ? candidate.extraUsageEnabled === false ? "subscription" as const : "paid-fallback" as const
+      : candidate.billingMode
+  }));
+  const subscription = resolved.filter((candidate) =>
+    candidate.effectiveBillingMode === "subscription" &&
+    (candidate.state === "available" || (candidate.billingMode === "subscription" && candidate.state === "unknown"))
   );
   if (subscription.length > 0) {
     return { credentials: subscription.map((candidate) => candidate.credential), lane: "subscription" };
   }
 
-  const paid = candidates.filter((candidate) => candidate.billingMode === "paid-fallback");
+  const paid = resolved.filter((candidate) => candidate.effectiveBillingMode === "paid-fallback");
   if (paid.length === 0 || paid.some((candidate) => candidate.state === "unknown")) {
     return { credentials: [], lane: "quota-blocked" };
   }
@@ -1049,7 +1060,7 @@ export function selectSubscriptionFirstCredentialLane<T>(
   if (paidSubscription.length > 0) {
     return { credentials: paidSubscription.map((candidate) => candidate.credential), lane: "paid-subscription" };
   }
-  const paidFallback = eligiblePaid.filter((candidate) => candidate.state === "exhausted");
+  const paidFallback = eligiblePaid.filter((candidate) => candidate.state === "exhausted" && candidate.spendLimitReached !== true);
   return paidFallback.length > 0
     ? { credentials: paidFallback.map((candidate) => candidate.credential), lane: "paid-fallback" }
     : { credentials: [], lane: "quota-blocked" };
@@ -1064,13 +1075,17 @@ function quotaRoutedProviderCredentials(
   const configured = credentials.flatMap((credential) => {
     const account = credential.account === undefined ? provider.account : credential.account;
     const routing = account?.routing;
-    return routing?.mode === "subscription-first"
-      ? [{
-          billingMode: routing.billingMode,
-          credential,
-          state: readProviderAccountRoutingState(config, provider, credential, model)
-        }]
-      : [];
+    if (routing?.mode !== "subscription-first") {
+      return [];
+    }
+    const snapshot = readProviderAccountRoutingSnapshot(config, provider, credential, model);
+    return [{
+      billingMode: routing.billingMode,
+      credential,
+      extraUsageEnabled: snapshot.extraUsageEnabled,
+      spendLimitReached: snapshot.spendLimitReached,
+      state: snapshot.state
+    }];
   });
   return configured.length > 0 ? selectSubscriptionFirstCredentialLane(configured) : undefined;
 }

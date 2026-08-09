@@ -239,9 +239,9 @@ export type ProviderCredentialConfig = {
 };
 
 export type ProviderAccountAuthMode = "provider-api-key" | "provider-api-key-raw" | "none";
-export type ProviderAccountConnectorSource = "standard" | "http-json" | "plugin" | "local-estimate" | "merged" | "unsupported";
+export type ProviderAccountConnectorSource = "standard" | "http-json" | "claude-oauth-usage" | "plugin" | "local-estimate" | "merged" | "unsupported";
 export type ProviderAccountStatus = "ok" | "warning" | "critical" | "error" | "unsupported";
-export type ProviderAccountMeterKind = "balance" | "subscription" | "quota" | "time_window" | "tokens" | "requests";
+export type ProviderAccountMeterKind = "balance" | "credits" | "subscription" | "quota" | "time_window" | "tokens" | "requests";
 export type ProviderAccountMeterUnit = "USD" | "CNY" | "hours" | "minutes" | "tokens" | "requests" | string;
 export type ProviderAccountMeterWindow = "5h" | "daily" | "weekly" | "monthly" | string;
 export type ProviderAccountHttpJsonParser = "grok-subscription" | "kimi-code-usages" | "new-api-key-usage" | "new-api-user-self";
@@ -254,7 +254,7 @@ export type ProviderAccountConfig = {
 };
 
 export type ProviderAccountRoutingConfig = {
-  billingMode: "subscription" | "paid-fallback";
+  billingMode: "auto" | "subscription" | "paid-fallback";
   mode: "subscription-first";
   requiredMeters: ProviderAccountRoutingMeterRequirement[];
 };
@@ -268,6 +268,7 @@ export type ProviderAccountRoutingMeterRequirement = {
 export type ProviderAccountConnectorConfig =
   | ProviderAccountStandardConnectorConfig
   | ProviderAccountHttpJsonConnectorConfig
+  | ProviderAccountClaudeOauthUsageConnectorConfig
   | ProviderAccountPluginConnectorConfig
   | ProviderAccountLocalEstimateConnectorConfig;
 
@@ -293,6 +294,11 @@ export type ProviderAccountHttpJsonConnectorConfig = ProviderAccountConnectorBas
   method?: "GET" | "POST";
   parser?: ProviderAccountHttpJsonParser;
   type: "http-json";
+};
+
+export type ProviderAccountClaudeOauthUsageConnectorConfig = ProviderAccountConnectorBaseConfig & {
+  sourceFile?: string;
+  type: "claude-oauth-usage";
 };
 
 export type ProviderAccountPluginConnectorConfig = ProviderAccountConnectorBaseConfig & {
@@ -347,6 +353,7 @@ export type ProviderAccountMeterDetail = {
 };
 
 export type ProviderAccountMeter = {
+  currency?: string;
   details?: ProviderAccountMeterDetail[];
   id: string;
   kind: ProviderAccountMeterKind;
@@ -367,15 +374,20 @@ export type ProviderAccountConnectorError = {
 };
 
 export type ProviderAccountSnapshot = {
+  accountEmail?: string;
   credentialId?: string;
   credentialLabel?: string;
   errors?: ProviderAccountConnectorError[];
+  extraUsageEnabled?: boolean;
   message?: string;
   meters: ProviderAccountMeter[];
   nextRefreshAt?: string;
   provider: string;
   source: ProviderAccountConnectorSource;
+  spendLimitReached?: boolean;
   status: ProviderAccountStatus;
+  subscriptionStatus?: string;
+  subscriptionTier?: string;
   updatedAt: string;
 };
 

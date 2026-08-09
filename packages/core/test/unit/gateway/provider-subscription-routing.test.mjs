@@ -5,12 +5,12 @@ import {
   prepareGatewayUpstreamAttemptForTest,
   selectSubscriptionFirstCredentialLane
 } from "@ccr/core/gateway/upstream/executor.ts";
-import { invalidateProviderAccountSnapshotCache, readProviderAccountRoutingState } from "@ccr/core/providers/account-service.ts";
+import { classifyProviderAccountRoutingSnapshot, invalidateProviderAccountSnapshotCache, readProviderAccountRoutingState } from "@ccr/core/providers/account-service.ts";
 import { RequestRouteTraceRecorder } from "@ccr/core/observability/route-trace.ts";
 import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool.ts";
 
-function laneCandidate(credential, billingMode, state) {
-  return { billingMode, credential, state };
+function laneCandidate(credential, billingMode, state, metadata = {}) {
+  return { billingMode, credential, state, ...metadata };
 }
 
 async function waitFor(predicate, timeoutMs = 2_000) {
@@ -116,6 +116,94 @@ test("subscription-first lane selects paid fallback only when every credential i
   ]), {
     credentials: ["paid-a", "paid-b"],
     lane: "paid-fallback"
+  });
+});
+
+test("automatic billing mode follows extra-usage state and defaults conservatively without a snapshot", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("auto-subscription", "auto", "available", { extraUsageEnabled: false })
+  ]), {
+    credentials: ["auto-subscription"],
+    lane: "subscription"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("auto-paid", "auto", "available", { extraUsageEnabled: true })
+  ]), {
+    credentials: ["auto-paid"],
+    lane: "paid-subscription"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("auto-unknown", "auto", "unknown")
+  ]), {
+    credentials: [],
+    lane: "quota-blocked"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("auto-subscription-unknown", "auto", "unknown", { extraUsageEnabled: false })
+  ]), {
+    credentials: [],
+    lane: "quota-blocked"
+  });
+});
+
+test("spend-limit exhaustion blocks paid fallback without blocking included paid-subscription quota", () => {
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("capped", "paid-fallback", "exhausted", { spendLimitReached: true })
+  ]), {
+    credentials: [],
+    lane: "quota-blocked"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("capped-with-headroom", "paid-fallback", "available", { spendLimitReached: true })
+  ]), {
+    credentials: ["capped-with-headroom"],
+    lane: "paid-subscription"
+  });
+});
+
+test("Fable requests select only credentials with Fable headroom while Sonnet can use the whole pool", () => {
+  const routing = {
+    billingMode: "subscription",
+    mode: "subscription-first",
+    requiredMeters: [
+      { id: "session" },
+      { id: "weekly" },
+      { id: "scoped_weekly", models: ["claude-fable-5"] }
+    ]
+  };
+  const snapshot = (fableRemaining) => ({
+    meters: [
+      { id: "session", kind: "quota", label: "Session", remaining: 80, unit: "percent" },
+      { id: "weekly", kind: "quota", label: "Weekly", remaining: 70, unit: "percent" },
+      { id: "scoped_weekly", kind: "quota", label: "Fable weekly", remaining: fableRemaining, unit: "percent" }
+    ],
+    provider: "Claude Pool",
+    source: "claude-oauth-usage",
+    status: "ok",
+    updatedAt: new Date().toISOString()
+  });
+  const fableStates = [
+    classifyProviderAccountRoutingSnapshot(snapshot(0), routing, "claude-fable-5"),
+    classifyProviderAccountRoutingSnapshot(snapshot(40), routing, "claude-fable-5")
+  ];
+  const sonnetStates = [
+    classifyProviderAccountRoutingSnapshot(snapshot(0), routing, "claude-sonnet-5"),
+    classifyProviderAccountRoutingSnapshot(snapshot(40), routing, "claude-sonnet-5")
+  ];
+
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("fable-empty", "subscription", fableStates[0]),
+    laneCandidate("fable-ready", "subscription", fableStates[1])
+  ]), {
+    credentials: ["fable-ready"],
+    lane: "subscription"
+  });
+  assert.deepEqual(selectSubscriptionFirstCredentialLane([
+    laneCandidate("fable-empty", "subscription", sonnetStates[0]),
+    laneCandidate("fable-ready", "subscription", sonnetStates[1])
+  ]), {
+    credentials: ["fable-empty", "fable-ready"],
+    lane: "subscription"
   });
 });
 

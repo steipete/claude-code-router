@@ -4,12 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  claudeOauthUsageMetadataForTest,
+  claudeOauthUsageMetersForTest,
   classifyProviderAccountRoutingSnapshot,
+  invalidateProviderAccountSnapshotCache,
   localAgentProviderAccountCredentialForTest,
   localCodexAccountCredentialForTest,
+  readProviderAccountRoutingState,
+  resolveClaudeOauthUsageConnectorForTest,
   testProviderAccountConnector
 } from "@ccr/core/providers/account-service.ts";
 import {
+  grokClientVersion,
   grokDefaultBillingEndpoint,
   grokDefaultBaseUrl,
   grokDefaultSubscriptionEndpoint,
@@ -19,6 +25,62 @@ import {
 const localAgentProviderApiKey = "ccr-local-agent-login";
 const codexDefaultBaseUrl = "https://chatgpt.com/backend-api/codex";
 const zcodeDefaultBaseUrl = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
+
+function writeClaudeOauthSource(directory, name, accessToken = "synthetic-claude-access") {
+  const sourceFile = path.join(directory, name);
+  writeFileSync(sourceFile, JSON.stringify({
+    access_token: accessToken,
+    expired: "2099-01-01T00:00:00.000Z",
+    refresh_token: "synthetic-claude-refresh"
+  }), { mode: 0o600 });
+  chmodSync(sourceFile, 0o600);
+  return sourceFile;
+}
+
+function claudeUsagePayload(overrides = {}) {
+  return {
+    extra_usage: {
+      currency: "EUR",
+      is_enabled: true,
+      monthly_limit: 300000,
+      spend_limit_reached: false,
+      used_credits: 119945,
+      utilization: 39.98
+    },
+    five_hour: { resets_at: "2026-08-10T02:10:00Z", utilization: 0 },
+    limits: [
+      {
+        kind: "weekly_scoped",
+        percent: 34,
+        resets_at: "2026-08-15T08:00:00Z",
+        scope: { model: { display_name: "Fable", id: null } }
+      }
+    ],
+    seven_day: { resets_at: "2026-08-15T08:00:00Z", utilization: 20 },
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    ...overrides
+  };
+}
+
+function claudeProfilePayload() {
+  return {
+    account: { email: "max@example.test" },
+    organization: {
+      has_extra_usage_enabled: true,
+      rate_limit_tier: "default_claude_max_20x",
+      subscription_status: "active"
+    }
+  };
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw new Error("Timed out waiting for provider account refresh.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 function routingSnapshot(meters, overrides = {}) {
   return {
@@ -91,6 +153,258 @@ test("subscription routing treats fresh connector, missing, and nonfinite meter 
   }), routing), "unavailable");
 });
 
+test("Claude OAuth usage maps general, Fable-scoped, foreign-scoped, and extra-usage meters", () => {
+  const payload = claudeUsagePayload({
+    limits: [
+      ...claudeUsagePayload().limits,
+      {
+        kind: "weekly_scoped",
+        percent: 55,
+        resets_at: "2026-08-15T09:00:00Z",
+        scope: { model: { display_name: "Verse 2", id: null } }
+      }
+    ]
+  });
+  const meters = claudeOauthUsageMetersForTest(payload);
+
+  assert.deepEqual(meters.map((meter) => meter.id), [
+    "session",
+    "weekly",
+    "scoped_weekly",
+    "scoped_weekly_verse_2",
+    "spend"
+  ]);
+  assert.deepEqual(meters.find((meter) => meter.id === "session"), {
+    id: "session",
+    kind: "quota",
+    label: "Session",
+    limit: 100,
+    remaining: 100,
+    resetAt: "2026-08-10T02:10:00Z",
+    source: "claude-oauth-usage",
+    unit: "percent",
+    used: 0,
+    window: "5h"
+  });
+  assert.equal(meters.find((meter) => meter.id === "weekly")?.remaining, 80);
+  assert.equal(meters.find((meter) => meter.id === "scoped_weekly")?.label, "Fable weekly");
+  assert.equal(meters.find((meter) => meter.id === "scoped_weekly_verse_2")?.remaining, 45);
+  assert.deepEqual(meters.find((meter) => meter.id === "spend"), {
+    currency: "EUR",
+    id: "spend",
+    kind: "credits",
+    label: "Extra usage",
+    limit: 3000,
+    remaining: 1800.55,
+    source: "claude-oauth-usage",
+    unit: "EUR",
+    used: 1199.45,
+    window: "monthly"
+  });
+  assert.deepEqual(claudeOauthUsageMetadataForTest(payload, claudeProfilePayload()), {
+    accountEmail: "max@example.test",
+    extraUsageEnabled: true,
+    spendLimitReached: false,
+    subscriptionStatus: "active",
+    subscriptionTier: "default_claude_max_20x"
+  });
+});
+
+test("Claude OAuth usage tolerates missing scoped limits and omits incomplete extra usage", () => {
+  const payload = claudeUsagePayload({
+    extra_usage: {
+      is_enabled: true,
+      monthly_limit: null,
+      spend_limit_reached: true,
+      used_credits: null,
+      utilization: null
+    },
+    limits: undefined
+  });
+  const meters = claudeOauthUsageMetersForTest(payload);
+  assert.deepEqual(meters.map((meter) => meter.id), ["session", "weekly"]);
+  assert.equal(meters.some((meter) => meter.id === "spend"), false);
+  assert.equal(claudeOauthUsageMetadataForTest(payload).spendLimitReached, true);
+});
+
+test("Fable exhaustion is independent from general Claude weekly headroom", () => {
+  const meters = claudeOauthUsageMetersForTest(claudeUsagePayload({
+    limits: [{
+      kind: "weekly_scoped",
+      percent: 100,
+      resets_at: "2026-08-15T08:00:00Z",
+      scope: { model: { display_name: "fAbLe" } }
+    }]
+  }));
+  const snapshot = routingSnapshot(meters);
+
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, "claude-fable-5"), "exhausted");
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, "claude-opus-5"), "available");
+  assert.equal(classifyProviderAccountRoutingSnapshot(snapshot, subscriptionFirstRouting, "claude-sonnet-5"), "available");
+});
+
+test("Claude OAuth usage resolves explicit and credential-plugin source files and fails clearly without either", async (t) => {
+  invalidateProviderAccountSnapshotCache();
+  t.after(() => invalidateProviderAccountSnapshotCache());
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ccr-claude-usage-source-"));
+  const explicitSource = writeClaudeOauthSource(directory, "explicit.json", "synthetic-explicit-access");
+  const pluginSource = writeClaudeOauthSource(directory, "plugin.json", "synthetic-plugin-access");
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    requests.push({ authorization: init?.headers?.Authorization, url: String(input) });
+    return new Response(JSON.stringify(String(input).endsWith("/profile") ? claudeProfilePayload() : claudeUsagePayload()), {
+      headers: { "content-type": "application/json" },
+      status: 200
+    });
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+
+  const credential = { apiKey: "opaque-account-a", id: "account-a", name: "Account A" };
+  const provider = {
+    api_base_url: "https://api.anthropic.com",
+    credentials: [credential],
+    id: "provider-claude-pool",
+    models: ["claude-fable-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  };
+  const plugin = {
+    claudeOauth: { sourceFile: pluginSource },
+    key: "ccr-local-agent-claude-pool-claude-code-oauth",
+    providerName: "provider-claude-pool::anthropic_messages::cred:account-a"
+  };
+
+  const explicit = await resolveClaudeOauthUsageConnectorForTest(
+    { providerPlugins: [plugin] },
+    provider,
+    { sourceFile: explicitSource, type: "claude-oauth-usage" },
+    credential
+  );
+  assert.equal(explicit.accountEmail, "max@example.test");
+  assert.equal(requests[0]?.authorization, "Bearer synthetic-explicit-access");
+
+  const derived = await resolveClaudeOauthUsageConnectorForTest(
+    { providerPlugins: [plugin] },
+    provider,
+    { type: "claude-oauth-usage" },
+    credential
+  );
+  assert.equal(derived.subscriptionTier, "default_claude_max_20x");
+  assert.equal(requests.some((request) => request.authorization === "Bearer synthetic-plugin-access"), true);
+
+  const missing = await resolveClaudeOauthUsageConnectorForTest(
+    { providerPlugins: [] },
+    provider,
+    { type: "claude-oauth-usage" },
+    credential
+  );
+  assert.equal(missing.status, "error");
+  assert.match(missing.errors[0]?.message ?? "", /source file was not configured/i);
+  assert.equal(JSON.stringify(missing).includes("synthetic-"), false);
+});
+
+test("Claude OAuth usage deduplicates concurrent profile fetches per source file", async (t) => {
+  invalidateProviderAccountSnapshotCache();
+  t.after(() => invalidateProviderAccountSnapshotCache());
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ccr-claude-profile-cache-"));
+  const sourceFile = writeClaudeOauthSource(directory, "account.json");
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  let profileRequests = 0;
+  let usageRequests = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/profile")) {
+      profileRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return new Response(JSON.stringify(claudeProfilePayload()), { headers: { "content-type": "application/json" }, status: 200 });
+    }
+    usageRequests += 1;
+    return new Response(JSON.stringify(claudeUsagePayload()), { headers: { "content-type": "application/json" }, status: 200 });
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const provider = {
+    api_base_url: "https://api.anthropic.com",
+    id: "provider-claude-pool",
+    models: ["claude-fable-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  };
+  const connector = { sourceFile, type: "claude-oauth-usage" };
+
+  await Promise.all([
+    resolveClaudeOauthUsageConnectorForTest({ providerPlugins: [] }, provider, connector),
+    resolveClaudeOauthUsageConnectorForTest({ providerPlugins: [] }, provider, connector)
+  ]);
+  await resolveClaudeOauthUsageConnectorForTest({ providerPlugins: [] }, provider, connector);
+
+  assert.equal(usageRequests, 3);
+  assert.equal(profileRequests, 1);
+});
+
+test("Claude OAuth usage caches profile hourly, honors capped Retry-After, and serves a good snapshot for 15 minutes", async (t) => {
+  invalidateProviderAccountSnapshotCache();
+  t.after(() => invalidateProviderAccountSnapshotCache());
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-08-10T00:00:00Z") });
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ccr-claude-usage-stale-"));
+  const sourceFile = writeClaudeOauthSource(directory, "account.json");
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  let usageRequests = 0;
+  let profileRequests = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/profile")) {
+      profileRequests += 1;
+      return new Response(JSON.stringify(claudeProfilePayload()), { headers: { "content-type": "application/json" }, status: 200 });
+    }
+    usageRequests += 1;
+    if (usageRequests === 1) {
+      return new Response(JSON.stringify(claudeUsagePayload()), { headers: { "content-type": "application/json" }, status: 200 });
+    }
+    return new Response("rate limited", { headers: { "retry-after": "3600" }, status: 429 });
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+
+  const account = {
+    connectors: [{ sourceFile, type: "claude-oauth-usage" }],
+    enabled: true,
+    refreshIntervalMs: 30_000,
+    routing: subscriptionFirstRouting
+  };
+  const credential = { account, apiKey: "opaque-account", id: "account" };
+  const provider = {
+    api_base_url: "https://api.anthropic.com",
+    credentials: [credential],
+    id: "provider-claude-pool",
+    models: ["claude-fable-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  };
+  const config = { Providers: [provider], Router: { rules: [] }, gateway: {}, providerPlugins: [] };
+
+  assert.equal(readProviderAccountRoutingState(config, provider, credential, "claude-fable-5"), "unknown");
+  await waitFor(() => usageRequests === 1 && profileRequests === 1);
+  assert.equal(readProviderAccountRoutingState(config, provider, credential, "claude-fable-5"), "available");
+  assert.equal(profileRequests, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  t.mock.timers.setTime(Date.now() + 30_001);
+  assert.equal(readProviderAccountRoutingState(config, provider, credential, "claude-fable-5"), "available");
+  await waitFor(() => usageRequests === 2);
+  assert.equal(profileRequests, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  t.mock.timers.setTime(Date.parse("2026-08-10T00:14:59Z"));
+  assert.equal(readProviderAccountRoutingState(config, provider, credential, "claude-fable-5"), "available");
+  assert.equal(usageRequests, 2);
+
+  t.mock.timers.setTime(Date.parse("2026-08-10T00:15:01Z"));
+  assert.equal(readProviderAccountRoutingState(config, provider, credential, "claude-fable-5"), "unknown");
+  await waitFor(() => readProviderAccountRoutingState(config, provider, credential, "claude-fable-5") === "unavailable");
+  assert.equal(usageRequests, 3);
+});
+
 test("Grok billing connector maps credit usage payload", async (t) => {
   const previousFetch = globalThis.fetch;
   let authorization = "";
@@ -129,7 +443,7 @@ test("Grok billing connector maps credit usage payload", async (t) => {
 
   assert.equal(authorization, "Bearer grok-access-token");
   assert.equal(clientIdentifier, "xai-grok-cli");
-  assert.equal(clientVersion, "0.2.93");
+  assert.equal(clientVersion, grokClientVersion());
   assert.equal(result.meters.find((meter) => meter.id === "grok_credit_usage_percent")?.remaining, 75);
   assert.equal(result.meters.find((meter) => meter.id === "grok_included_credits")?.remaining, 30);
   assert.equal(result.meters.find((meter) => meter.id === "grok_total_credits")?.used, 15);
@@ -167,7 +481,7 @@ test("Grok subscription connector maps access status payload", async (t) => {
 
   assert.equal(authorization, "Bearer grok-access-token");
   assert.equal(clientIdentifier, "xai-grok-cli");
-  assert.equal(clientVersion, "0.2.93");
+  assert.equal(clientVersion, grokClientVersion());
   assert.equal(result.status, "ok");
   assert.equal(result.message, "SuperGrok Heavy");
   assert.equal(result.meters.find((meter) => meter.id === "grok_subscription_access")?.remaining, 100);

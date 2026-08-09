@@ -3082,6 +3082,12 @@ function App() {
                   }),
                   updateRule: updateRoutingRule
                 },
+                subscriptions: {
+                  config: draftConfig,
+                  providerAccounts: providerAccountSnapshots,
+                  providerAccountRefreshing,
+                  refreshProviderAccounts: () => void refreshProviderAccountsNow()
+                },
                 virtualModels: {
                   addVirtualModel: openAddVirtualModelDialog,
                   editVirtualModel: openEditVirtualModelDialog,

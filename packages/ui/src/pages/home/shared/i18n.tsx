@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import { translateErrorMessage } from "@ccr/core/contracts/i18n";
 
-type NavigationId = "onboarding" | "overview" | "observability" | "api-keys" | "server" | "profile" | "networking" | "logs" | "providers" | "models" | "routing" | "virtual-models" | "extensions";
+type NavigationId = "onboarding" | "overview" | "subscriptions" | "observability" | "api-keys" | "server" | "profile" | "networking" | "logs" | "providers" | "models" | "routing" | "virtual-models" | "extensions";
 type ResolvedLanguage = "en" | "zh";
 
 export type AppCopy = {
@@ -113,6 +113,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       networking: "Networking",
       observability: "Observability",
       overview: "Overview",
+      subscriptions: "Subscriptions",
       profile: "Agent Profiles",
       providers: "Providers",
       models: "Models",
@@ -650,6 +651,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       networking: "网络",
       observability: "观测",
       overview: "概览",
+      subscriptions: "订阅",
       profile: "Agent 配置档案",
       providers: "供应商",
       models: "模型",
@@ -750,6 +752,43 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       primaryNavigation: "主导航"
     },
     text: {
+      "Claude Pool telemetry": "Claude Pool 遥测",
+      "Subscription health": "订阅健康",
+      "Included subscription windows are checked locally with each account's OAuth session. Fable weekly is a separate, smaller allowance.": "CCR 使用每个账户的 OAuth 会话在本机检查订阅额度。Fable 每周额度是独立且更小的额度。",
+      "Configured": "已配置",
+      "General weekly ready": "通用周额度可用",
+      "Fable ready": "Fable 可用",
+      "unknown": "未知",
+      "of": "共",
+      "separate weekly window": "独立周额度",
+      "No Claude Pool subscriptions found": "未找到 Claude Pool 订阅",
+      "Add credentials with a Claude OAuth usage connector to see their independent quota windows here.": "添加带 Claude OAuth 用量连接器的凭据，即可在此查看各自独立的额度窗口。",
+      "Capacity answer:": "容量结论：",
+      "confirmed with Fable headroom;": "个已确认有 Fable 余量；",
+      "confirmed with general weekly headroom.": "个已确认有通用周额度余量。",
+      "Telemetry is unavailable for": "遥测不可用：",
+      "enabled subscriptions; capacity is not inferred for those accounts.": "个已启用订阅；不会推断这些账户的容量。",
+      "Throttle Fable traffic or add subscription capacity.": "请限制 Fable 流量或增加订阅容量。",
+      "Email unavailable": "邮箱不可用",
+      "available": "可用",
+      "exhausted": "已耗尽",
+      "unavailable": "不可用",
+      "Tier unknown": "套餐未知",
+      "Fable weekly": "Fable 每周",
+      "Extra usage": "额外用量",
+      "Spend limit reached": "已达到消费上限",
+      "Billing": "计费模式",
+      "Current lane": "当前通道",
+      "Updated": "更新于",
+      "Separate allowance": "独立额度",
+      "Usage unavailable": "用量不可用",
+      "left": "剩余",
+      "Resets": "重置于",
+      "Subscription": "订阅",
+      "Paid fallback": "付费回退",
+      "Paid subscription": "付费订阅额度",
+      "Not selected": "未选择",
+      "Quota blocked": "额度已阻止",
       "24h": "24 小时",
       "7d": "7 天",
       "30d": "30 天",

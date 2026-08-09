@@ -1,5 +1,6 @@
 import {
   Activity,
+  BatteryCharging,
   Box,
   Boxes,
   Braces,
@@ -69,7 +70,7 @@ import trayCyanIconUrl from "@/assets/tray-cyan.png";
 import trayOrangeIconUrl from "@/assets/tray-orange.png";
 import trayVioletIconUrl from "@/assets/tray-violet.png";
 
-type ViewId = "onboarding" | "overview" | "observability" | "api-keys" | "server" | "profile" | "networking" | "logs" | "providers" | "models" | "routing" | "virtual-models" | "extensions";
+type ViewId = "onboarding" | "overview" | "subscriptions" | "observability" | "api-keys" | "server" | "profile" | "networking" | "logs" | "providers" | "models" | "routing" | "virtual-models" | "extensions";
 type NavigationId = ViewId;
 type OnboardingStepId = "provider" | "profile" | "enter";
 type ProviderAccountDraftMode = "standard" | "http-json" | "raw";
@@ -395,6 +396,7 @@ export const mcpServerStartupTimeoutMs = 600000;
 
 export const navigation: Array<{ icon: LucideIcon; id: NavigationId }> = [
   { icon: Gauge, id: "overview" },
+  { icon: BatteryCharging, id: "subscriptions" },
   { icon: Layers3, id: "providers" },
   { icon: UserRound, id: "profile" },
   { icon: Route, id: "routing" },

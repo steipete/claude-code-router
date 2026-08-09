@@ -16,6 +16,7 @@ import { OnboardingView } from "./onboarding";
 import { ProfileView } from "./profiles";
 import { ModelsView, ProvidersView } from "./providers";
 import { RoutingView } from "./routing";
+import { SubscriptionsView } from "./subscriptions";
 import { VirtualModelsView } from "./virtual-models";
 
 export type MainNavigationItem = {
@@ -36,7 +37,7 @@ const sidebarNavigationGroupDefinitions: Array<{
 }> = [
   { id: "workspace", itemIds: ["overview"], label: "Workspace" },
   { id: "setup", itemIds: ["providers", "profile", "routing"], label: "Setup" },
-  { id: "monitor", itemIds: ["logs", "observability"], label: "Monitor" },
+  { id: "monitor", itemIds: ["subscriptions", "logs", "observability"], label: "Monitor" },
   { id: "advanced", itemIds: ["virtual-models", "models", "api-keys", "extensions"], label: "Advanced" }
 ];
 
@@ -64,6 +65,7 @@ type MainViewProps = {
   profile: ComponentProps<typeof ProfileView>;
   providers: ComponentProps<typeof ProvidersView>;
   routing: ComponentProps<typeof RoutingView>;
+  subscriptions: ComponentProps<typeof SubscriptionsView>;
   virtualModels: ComponentProps<typeof VirtualModelsView>;
 };
 
@@ -457,6 +459,7 @@ function MainViewSwitch({
         {activeView === "providers" ? <ProvidersView {...viewProps.providers} /> : null}
         {activeView === "models" ? <ModelsView {...viewProps.models} /> : null}
         {activeView === "routing" ? <RoutingView {...viewProps.routing} /> : null}
+        {activeView === "subscriptions" ? <SubscriptionsView {...viewProps.subscriptions} /> : null}
         {activeView === "virtual-models" ? <VirtualModelsView {...viewProps.virtualModels} /> : null}
         {activeView === "extensions" ? <ExtensionsView {...viewProps.extensions} /> : null}
       </ViewMotionShell>

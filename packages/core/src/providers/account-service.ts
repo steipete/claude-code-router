@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { loadAppConfig } from "@ccr/core/config/config";
 import { attachCodexRateLimitResetCreditDetails } from "@ccr/core/agents/local-providers/codex";
 import {
@@ -10,6 +11,7 @@ import {
   readCodexAuth,
   readGrokAuth,
   readKimiAuth,
+  resolveClaudeCodeOauthSource,
   resolveGrokAuth,
   resolveKimiAuth,
   readZcodeLocalProviderCredential,
@@ -22,6 +24,8 @@ import { findProviderPresetByBaseUrl, providerEndpointCanReceiveProviderApiKey }
 import { fetchWithSystemProxy } from "@ccr/core/proxy/system-proxy-fetch";
 import { normalizeProviderBaseUrl, providerUrlWithDefaultScheme } from "@ccr/core/providers/url";
 import { isGatewayProviderEnabled } from "@ccr/core/contracts/app";
+import { inferProtocol, normalizeProviderProtocol, providerCredentialInternalName } from "@ccr/core/providers/runtime-topology";
+import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, claudeCodeOauthUserAgent } from "@ccr/core/providers/oauth-plugin";
 import type {
   AppConfig,
   GatewayProviderConfig,
@@ -30,6 +34,7 @@ import type {
   ProviderAccountConnectorError,
   ProviderAccountConnectorSource,
   ProviderAccountAuthMode,
+  ProviderAccountClaudeOauthUsageConnectorConfig,
   ProviderAccountHttpJsonConnectorConfig,
   ProviderAccountLocalEstimateConnectorConfig,
   ProviderAccountLocalWindowConfig,
@@ -61,11 +66,17 @@ type CacheEntry = {
 };
 
 type ConnectorResult = {
+  accountEmail?: string;
   errors: ProviderAccountConnectorError[];
+  extraUsageEnabled?: boolean;
   meters: ProviderAccountMeter[];
   message?: string;
+  retryAfterMs?: number;
   source: ProviderAccountConnectorSource;
+  spendLimitReached?: boolean;
   status?: ProviderAccountStatus;
+  subscriptionStatus?: string;
+  subscriptionTier?: string;
 };
 
 type ProviderAccountTarget = {
@@ -94,10 +105,21 @@ type CodexOauthRefreshResult = {
   scope?: string;
 };
 
+type ClaudeOauthProfileCacheEntry = {
+  expiresAt: number;
+  profile?: Record<string, unknown>;
+};
+
 const defaultRefreshIntervalMs = 5 * 60 * 1000;
 const minRefreshIntervalMs = 30 * 1000;
 const maxErrorRefreshIntervalMs = 60 * 1000;
 const maxStaleAccountSnapshotMs = 2 * 60 * 1000;
+const claudeOauthUsageStaleWindowMs = 15 * 60 * 1000;
+const claudeOauthRetryAfterCapMs = 15 * 60 * 1000;
+const claudeOauthProfileCacheMs = 60 * 60 * 1000;
+const claudeOauthRequestTimeoutMs = 10_000;
+const claudeOauthUsageEndpoint = "https://api.anthropic.com/api/oauth/usage";
+const claudeOauthProfileEndpoint = "https://api.anthropic.com/api/oauth/profile";
 const maxCacheEntries = 500;
 const standardAccountPaths = ["/.well-known/ccr/account", "/v1/account/limits"];
 const codexRateLimitResetCreditConsumeEndpoint = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -107,6 +129,8 @@ const codexOauthDefaultScope = "openid profile email offline_access api.connecto
 const codexOauthRequiredScopes = ["api.connectors.read", "api.connectors.invoke"];
 const codexOauthDefaultTimeoutMs = 8_000;
 const cache = new Map<string, CacheEntry>();
+const claudeOauthProfileCache = new Map<string, ClaudeOauthProfileCacheEntry>();
+const claudeOauthProfileInFlight = new Map<string, Promise<Record<string, unknown> | undefined>>();
 const codexOauthCache = new Map<string, CodexOauthRefreshResult>();
 const inFlightRefreshes = new Map<string, Promise<ProviderAccountSnapshot | undefined>>();
 let cacheGeneration = 0;
@@ -119,24 +143,49 @@ export function readProviderAccountRoutingState(
   credential: ProviderCredentialConfig,
   model?: string
 ): ProviderAccountRoutingState {
+  return readProviderAccountRoutingSnapshot(config, provider, credential, model).state;
+}
+
+export function readProviderAccountRoutingSnapshot(
+  config: AppConfig,
+  provider: GatewayProviderConfig,
+  credential: ProviderCredentialConfig,
+  model?: string
+): { extraUsageEnabled?: boolean; spendLimitReached?: boolean; state: ProviderAccountRoutingState } {
   const inheritedAccount = effectiveProviderAccount(provider);
   const account = effectiveProviderCredentialAccount(provider, credential, inheritedAccount);
   if (!account?.routing || account.routing.mode !== "subscription-first") {
-    return "unknown";
+    return { state: "unknown" };
   }
 
   const materializedProvider = providerWithCredentialApiKey(provider, credential, account);
   const cacheKey = providerAccountCacheKey(materializedProvider, account, credential);
   const cached = cache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return classifyProviderAccountRoutingSnapshot(cached.snapshot, account.routing, model);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return providerAccountRoutingSnapshot(cached.snapshot, account.routing, model);
   }
 
   if (!inFlightRefreshes.has(cacheKey)) {
     const refreshIntervalMs = normalizeRefreshInterval(account.refreshIntervalMs);
     void startProviderAccountRefresh(config, materializedProvider, account, credential, cacheKey, refreshIntervalMs);
   }
-  return "unknown";
+  if (cached && cached.staleUntil > now) {
+    return providerAccountRoutingSnapshot(cached.snapshot, account.routing, model);
+  }
+  return { state: "unknown" };
+}
+
+function providerAccountRoutingSnapshot(
+  snapshot: ProviderAccountSnapshot,
+  routing: ProviderAccountRoutingConfig,
+  model?: string
+): { extraUsageEnabled?: boolean; spendLimitReached?: boolean; state: ProviderAccountRoutingState } {
+  return {
+    extraUsageEnabled: snapshot.extraUsageEnabled,
+    spendLimitReached: snapshot.spendLimitReached,
+    state: classifyProviderAccountRoutingSnapshot(snapshot, routing, model)
+  };
 }
 
 export function classifyProviderAccountRoutingSnapshot(
@@ -214,6 +263,8 @@ export function invalidateProviderAccountSnapshotCache(providerName?: string): v
   cacheGeneration += 1;
   if (!normalizedProviderName) {
     cache.clear();
+    claudeOauthProfileCache.clear();
+    claudeOauthProfileInFlight.clear();
     inFlightRefreshes.clear();
     return;
   }
@@ -307,6 +358,26 @@ export function newApiKeyUsageFallbackMessageForTest(payload: unknown): string {
 
 export function newApiUserSelfMetersForTest(payload: unknown): ProviderAccountMeter[] {
   return newApiUserSelfMeters(payload);
+}
+
+export function claudeOauthUsageMetersForTest(payload: unknown): ProviderAccountMeter[] {
+  return isRecord(payload) ? claudeOauthUsageMeters(payload) : [];
+}
+
+export function claudeOauthUsageMetadataForTest(payload: unknown, profile?: unknown) {
+  return claudeOauthUsageMetadata(
+    isRecord(payload) ? payload : {},
+    isRecord(profile) ? profile : undefined
+  );
+}
+
+export async function resolveClaudeOauthUsageConnectorForTest(
+  config: Pick<AppConfig, "providerPlugins">,
+  provider: GatewayProviderConfig,
+  connector: ProviderAccountClaudeOauthUsageConnectorConfig,
+  credential?: ProviderCredentialConfig
+) {
+  return resolveClaudeOauthUsageConnector(config as AppConfig, provider, connector, credential);
 }
 
 export async function localCodexAccountCredentialForTest(plugin: Record<string, unknown>): Promise<LocalAgentAccountCredential> {
@@ -429,21 +500,43 @@ async function refreshProviderAccountSnapshot(
   const now = new Date();
   const credentialId = credential ? providerCredentialRuntimeId(provider, credential) : undefined;
   const connectorResults = await Promise.all(
-    normalizeConnectors(account).map((connector) => resolveConnector(config, provider, connector, now, credentialId))
+    normalizeConnectors(account).map((connector) => resolveConnector(config, provider, connector, now, credential, credentialId))
   );
-  const snapshot = mergeConnectorResults(provider.name.trim(), connectorResults, now, refreshIntervalMs, credential, credentialId);
-  const cacheTtlMs = providerAccountCacheTtl(snapshot, refreshIntervalMs);
-  const expiresAt = Date.now() + cacheTtlMs;
+  const refreshedAt = Date.now();
+  const nextSnapshot = mergeConnectorResults(provider.name.trim(), connectorResults, now, refreshIntervalMs, credential, credentialId);
+  const retryAfterValues = connectorResults.map((result) => result.retryAfterMs).filter((value): value is number => value !== undefined);
+  const retryAfterMs = retryAfterValues.length > 0 ? Math.max(...retryAfterValues) : undefined;
+  const isClaudeOauthUsage = normalizeConnectors(account).some((connector) => connector.type === "claude-oauth-usage");
+  const previous = cache.get(cacheKey);
+  const previousGoodUntil = previous && isUsableProviderAccountSnapshot(previous.snapshot)
+    ? Date.parse(previous.snapshot.updatedAt) + claudeOauthUsageStaleWindowMs
+    : Number.NaN;
+  const keepPreviousGood = isClaudeOauthUsage && !isUsableProviderAccountSnapshot(nextSnapshot) && Number.isFinite(previousGoodUntil) && previousGoodUntil > refreshedAt;
+  const snapshot = keepPreviousGood && previous
+    ? { ...previous.snapshot }
+    : nextSnapshot;
+  const defaultTtlMs = providerAccountCacheTtl(nextSnapshot, refreshIntervalMs);
+  const cacheTtlMs = retryAfterMs ?? defaultTtlMs;
+  const staleUntil = keepPreviousGood
+    ? previousGoodUntil
+    : isClaudeOauthUsage && isUsableProviderAccountSnapshot(snapshot)
+      ? Date.parse(snapshot.updatedAt) + claudeOauthUsageStaleWindowMs
+      : refreshedAt + cacheTtlMs + providerAccountStaleWindow(cacheTtlMs);
+  const expiresAt = Math.min(refreshedAt + cacheTtlMs, staleUntil);
   snapshot.nextRefreshAt = new Date(expiresAt).toISOString();
   if (generation === cacheGeneration) {
     cache.set(cacheKey, {
       expiresAt,
       snapshot,
-      staleUntil: expiresAt + providerAccountStaleWindow(cacheTtlMs)
+      staleUntil
     });
     pruneProviderAccountCache();
   }
   return snapshot;
+}
+
+function isUsableProviderAccountSnapshot(snapshot: ProviderAccountSnapshot): boolean {
+  return snapshot.status !== "error" && snapshot.status !== "unsupported" && !snapshot.errors?.length && snapshot.meters.length > 0;
 }
 
 function providerAccountCacheKey(
@@ -676,6 +769,7 @@ async function resolveConnector(
   provider: GatewayProviderConfig,
   connector: ProviderAccountConnectorConfig,
   now: Date,
+  credential?: ProviderCredentialConfig,
   credentialId?: string
 ): Promise<ConnectorResult> {
   try {
@@ -684,6 +778,9 @@ async function resolveConnector(
     }
     if (connector.type === "http-json") {
       return await resolveHttpJsonConnector(config, provider, connector);
+    }
+    if (connector.type === "claude-oauth-usage") {
+      return await resolveClaudeOauthUsageConnector(config, provider, connector, credential);
     }
     if (connector.type === "plugin") {
       return await resolvePluginConnector(config, provider, connector, now);
@@ -789,6 +886,273 @@ async function resolveHttpJsonConnector(
     source: "http-json",
     status: normalizeStatus(readMappedString(connector.mapping.status, payload))
   };
+}
+
+async function resolveClaudeOauthUsageConnector(
+  config: AppConfig,
+  provider: GatewayProviderConfig,
+  connector: ProviderAccountClaudeOauthUsageConnectorConfig,
+  credential?: ProviderCredentialConfig
+): Promise<ConnectorResult> {
+  const sourceFile = claudeOauthUsageSourceFile(config, provider, connector, credential);
+  if (!sourceFile) {
+    return connectorError(
+      "claude-oauth-usage",
+      "Claude OAuth usage source file was not configured and no credential plugin binding provided one.",
+      connectorId(connector)
+    );
+  }
+
+  const oauth = await resolveClaudeCodeOauthSource(sourceFile);
+  if (!oauth?.accessToken) {
+    return connectorError(
+      "claude-oauth-usage",
+      "Claude OAuth usage source did not contain a usable access token.",
+      connectorId(connector)
+    );
+  }
+
+  const usageResponse = await fetchClaudeOauthJson(claudeOauthUsageEndpoint, oauth.accessToken);
+  if (!usageResponse.ok) {
+    return {
+      ...connectorError("claude-oauth-usage", usageResponse.error, connectorId(connector)),
+      retryAfterMs: usageResponse.retryAfterMs
+    };
+  }
+
+  const profile = await readClaudeOauthProfile(sourceFile, oauth.accessToken);
+  const metadata = claudeOauthUsageMetadata(usageResponse.payload, profile);
+  const meters = claudeOauthUsageMeters(usageResponse.payload);
+  return {
+    ...metadata,
+    errors: [],
+    meters,
+    message: meters.length === 0 ? "No Claude OAuth usage data available." : undefined,
+    source: "claude-oauth-usage"
+  };
+}
+
+type ClaudeOauthFetchResult =
+  | { ok: true; payload: Record<string, unknown> }
+  | { error: string; ok: false; retryAfterMs?: number };
+
+async function fetchClaudeOauthJson(endpoint: string, accessToken: string): Promise<ClaudeOauthFetchResult> {
+  let response: Response;
+  try {
+    response = await fetchWithSystemProxy(endpoint, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        "User-Agent": claudeCodeOauthUserAgent,
+        [claudeCodeOauthBetaHeader]: claudeCodeOauthRequiredBeta
+      },
+      method: "GET",
+      signal: AbortSignal.timeout(claudeOauthRequestTimeoutMs)
+    });
+  } catch (error) {
+    const message = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")
+      ? `Claude OAuth account request timed out after ${claudeOauthRequestTimeoutMs}ms.`
+      : "Claude OAuth account request failed.";
+    return { error: message, ok: false };
+  }
+
+  if (!response.ok) {
+    return {
+      error: `Claude OAuth account endpoint returned HTTP ${response.status}.`,
+      ok: false,
+      retryAfterMs: response.status === 429 ? claudeOauthRetryAfterMs(response.headers.get("retry-after")) : undefined
+    };
+  }
+
+  try {
+    const payload = await response.json() as unknown;
+    return isRecord(payload)
+      ? { ok: true, payload }
+      : { error: "Claude OAuth account endpoint returned an invalid JSON object.", ok: false };
+  } catch {
+    return { error: "Claude OAuth account endpoint returned malformed JSON.", ok: false };
+  }
+}
+
+function claudeOauthRetryAfterMs(value: string | null, now = Date.now()): number | undefined {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  const seconds = Number(normalized);
+  const delayMs = Number.isFinite(seconds)
+    ? Math.max(0, seconds * 1000)
+    : Math.max(0, Date.parse(normalized) - now);
+  return Number.isFinite(delayMs) ? Math.min(delayMs, claudeOauthRetryAfterCapMs) : undefined;
+}
+
+async function readClaudeOauthProfile(sourceFile: string, accessToken: string): Promise<Record<string, unknown> | undefined> {
+  const cacheKey = path.resolve(sourceFile);
+  const now = Date.now();
+  const cached = claudeOauthProfileCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.profile;
+  }
+  const inFlight = claudeOauthProfileInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = fetchClaudeOauthJson(claudeOauthProfileEndpoint, accessToken)
+    .then((response) => {
+      const profile = response.ok ? response.payload : undefined;
+      claudeOauthProfileCache.set(cacheKey, {
+        expiresAt: Date.now() + claudeOauthProfileCacheMs,
+        profile
+      });
+      return profile;
+    })
+    .finally(() => claudeOauthProfileInFlight.delete(cacheKey));
+  claudeOauthProfileInFlight.set(cacheKey, request);
+  return request;
+}
+
+function claudeOauthUsageSourceFile(
+  config: AppConfig,
+  provider: GatewayProviderConfig,
+  connector: ProviderAccountClaudeOauthUsageConnectorConfig,
+  credential?: ProviderCredentialConfig
+): string | undefined {
+  const explicit = connector.sourceFile?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (!credential) {
+    return undefined;
+  }
+  const protocol = normalizeProviderProtocol(provider.type) ??
+    provider.capabilities?.map((capability) => normalizeProviderProtocol(capability.type)).find((candidate) => candidate === "anthropic_messages") ??
+    inferProtocol(provider);
+  const internalName = providerCredentialInternalName(provider, protocol, credential).toLowerCase();
+  for (const plugin of config.providerPlugins ?? []) {
+    if (!isRecord(plugin)) {
+      continue;
+    }
+    const key = readString(plugin.key)?.toLowerCase() ?? "";
+    const binding = (readString(plugin.providerName) || readString(plugin.provider))?.toLowerCase();
+    if (!key.startsWith("ccr-local-agent-") || !key.includes("claude-code-oauth") || binding !== internalName) {
+      continue;
+    }
+    const oauth = isRecord(plugin.claudeOauth) ? plugin.claudeOauth : undefined;
+    const sourceFile = readString(oauth?.sourceFile) || readString(oauth?.source_file) || readHeader(localProviderPluginAuthHeaders(plugin), "x-ccr-claude-oauth-source");
+    if (sourceFile) {
+      return sourceFile;
+    }
+  }
+  return undefined;
+}
+
+function claudeOauthUsageMeters(payload: Record<string, unknown>): ProviderAccountMeter[] {
+  const meters: ProviderAccountMeter[] = [];
+  const session = claudeOauthPercentMeter(payload.five_hour, "session", "Session", "5h");
+  const weekly = claudeOauthPercentMeter(payload.seven_day, "weekly", "Weekly", "weekly");
+  if (session) meters.push(session);
+  if (weekly) meters.push(weekly);
+
+  const limits = Array.isArray(payload.limits) ? payload.limits : [];
+  for (const limit of limits) {
+    if (!isRecord(limit) || readString(limit.kind)?.toLowerCase() !== "weekly_scoped") {
+      continue;
+    }
+    const scope = isRecord(limit.scope) ? limit.scope : undefined;
+    const model = isRecord(scope?.model) ? scope.model : undefined;
+    const displayName = readString(model?.display_name);
+    const used = normalizeNumber(limit.percent);
+    if (!displayName || used === undefined) {
+      continue;
+    }
+    const isFable = displayName.toLowerCase() === "fable";
+    meters.push({
+      id: isFable ? "scoped_weekly" : `scoped_weekly_${slugifyMeterId(displayName)}`,
+      kind: "quota",
+      label: isFable ? "Fable weekly" : `${displayName} weekly`,
+      limit: 100,
+      remaining: 100 - used,
+      resetAt: readString(limit.resets_at),
+      source: "claude-oauth-usage",
+      unit: "percent",
+      used,
+      window: "weekly"
+    });
+  }
+
+  const extraUsage = isRecord(payload.extra_usage) ? payload.extra_usage : undefined;
+  const enabled = readBoolean(extraUsage?.is_enabled);
+  const usedCredits = normalizeNumber(extraUsage?.used_credits);
+  const monthlyLimit = normalizeNumber(extraUsage?.monthly_limit);
+  const utilization = normalizeNumber(extraUsage?.utilization);
+  if (enabled === true && usedCredits !== undefined && monthlyLimit !== undefined && utilization !== undefined) {
+    const currency = readString(extraUsage?.currency);
+    meters.push({
+      currency,
+      id: "spend",
+      kind: "credits",
+      label: "Extra usage",
+      limit: monthlyLimit / 100,
+      remaining: (monthlyLimit - usedCredits) / 100,
+      source: "claude-oauth-usage",
+      unit: currency ?? "credits",
+      used: usedCredits / 100,
+      window: "monthly"
+    });
+  }
+  return meters;
+}
+
+function claudeOauthPercentMeter(
+  value: unknown,
+  id: string,
+  label: string,
+  window: string
+): ProviderAccountMeter | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const used = normalizeNumber(value.utilization);
+  if (used === undefined) {
+    return undefined;
+  }
+  return {
+    id,
+    kind: "quota",
+    label,
+    limit: 100,
+    remaining: 100 - used,
+    resetAt: readString(value.resets_at),
+    source: "claude-oauth-usage",
+    unit: "percent",
+    used,
+    window
+  };
+}
+
+function claudeOauthUsageMetadata(
+  payload: Record<string, unknown>,
+  profile?: Record<string, unknown>
+): Pick<ConnectorResult, "accountEmail" | "extraUsageEnabled" | "spendLimitReached" | "subscriptionStatus" | "subscriptionTier"> {
+  const extraUsage = isRecord(payload.extra_usage) ? payload.extra_usage : undefined;
+  const organization = isRecord(profile?.organization) ? profile.organization : undefined;
+  const account = isRecord(profile?.account) ? profile.account : undefined;
+  return {
+    accountEmail: readString(account?.email),
+    extraUsageEnabled: readBoolean(extraUsage?.is_enabled),
+    spendLimitReached: readBoolean(extraUsage?.spend_limit_reached),
+    subscriptionStatus: readString(organization?.subscription_status),
+    subscriptionTier: readString(organization?.rate_limit_tier)
+  };
+}
+
+function slugifyMeterId(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "model";
 }
 
 async function resolvePluginConnector(
@@ -916,15 +1280,20 @@ function mergeConnectorResults(
   const message = results.find((result) => result.message)?.message ?? (errors.length > 0 && meters.length === 0 ? errors[0]?.message : undefined);
 
   return {
+    accountEmail: results.find((result) => result.accountEmail)?.accountEmail,
     credentialId,
     credentialLabel: credential?.name ?? credential?.label ?? credential?.id,
     errors: errors.length > 0 ? errors : undefined,
+    extraUsageEnabled: results.find((result) => result.extraUsageEnabled !== undefined)?.extraUsageEnabled,
     message,
     meters,
     nextRefreshAt: new Date(now.getTime() + refreshIntervalMs).toISOString(),
     provider,
     source,
+    spendLimitReached: results.find((result) => result.spendLimitReached !== undefined)?.spendLimitReached,
     status,
+    subscriptionStatus: results.find((result) => result.subscriptionStatus)?.subscriptionStatus,
+    subscriptionTier: results.find((result) => result.subscriptionTier)?.subscriptionTier,
     updatedAt: now.toISOString()
   };
 }
@@ -941,13 +1310,18 @@ function normalizeRemoteSnapshot(
     ? payload.meters.map((meter) => normalizeMeter(meter, source)).filter((meter): meter is ProviderAccountMeter => Boolean(meter))
     : [];
   return {
+    accountEmail: readString(payload.accountEmail),
     errors: normalizeRemoteErrors(payload.errors, source),
+    extraUsageEnabled: readBoolean(payload.extraUsageEnabled),
     message: readString(payload.message),
     meters,
     nextRefreshAt: readString(payload.nextRefreshAt),
     provider: readString(payload.provider) || provider,
     source,
+    spendLimitReached: readBoolean(payload.spendLimitReached),
     status: normalizeStatus(readString(payload.status)) ?? statusFromMeters(meters, [], 1),
+    subscriptionStatus: readString(payload.subscriptionStatus),
+    subscriptionTier: readString(payload.subscriptionTier),
     updatedAt: readString(payload.updatedAt) || new Date().toISOString()
   };
 }
@@ -1377,6 +1751,7 @@ function normalizeMeter(value: unknown, source: ProviderAccountConnectorSource):
   const remaining = normalizeNumber(value.remaining) ?? (limit !== undefined && used !== undefined ? limit - used : undefined);
   const details = normalizeMeterDetails(value.details);
   return {
+    currency: readString(value.currency),
     ...(details.length > 0 ? { details } : {}),
     id,
     kind: normalizeMeterKind(readString(value.kind)) ?? inferMeterKind(unit),
@@ -1869,6 +2244,11 @@ function withoutHeader(headers: Record<string, string>, header: string): Record<
   return Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== normalized));
 }
 
+function readHeader(headers: Record<string, string>, header: string): string | undefined {
+  const normalized = header.toLowerCase();
+  return Object.entries(headers).find(([key]) => key.toLowerCase() === normalized)?.[1];
+}
+
 function readBearerToken(value: string | undefined): string | undefined {
   const match = value?.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() || undefined;
@@ -2128,7 +2508,7 @@ function connectorError(source: ProviderAccountConnectorSource, message: string,
 }
 
 function connectorSource(connector: ProviderAccountConnectorConfig): ProviderAccountConnectorSource {
-  return connector.type === "standard" || connector.type === "http-json" || connector.type === "plugin" || connector.type === "local-estimate"
+  return connector.type === "standard" || connector.type === "http-json" || connector.type === "claude-oauth-usage" || connector.type === "plugin" || connector.type === "local-estimate"
     ? connector.type
     : "unsupported";
 }
@@ -2433,7 +2813,7 @@ function jsonPathFilterMatches(value: unknown, conditions: JsonPathFilterConditi
 }
 
 function normalizeMeterKind(value: string | undefined): ProviderAccountMeterKind | undefined {
-  if (value === "balance" || value === "subscription" || value === "quota" || value === "time_window" || value === "tokens" || value === "requests") {
+  if (value === "balance" || value === "credits" || value === "subscription" || value === "quota" || value === "time_window" || value === "tokens" || value === "requests") {
     return value;
   }
   return undefined;

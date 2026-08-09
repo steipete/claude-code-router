@@ -1672,7 +1672,7 @@ function parseProviderAccountRouting(value: unknown): ProviderAccountConfig["rou
     return undefined;
   }
   const billingMode = value.billingMode;
-  if (billingMode !== "subscription" && billingMode !== "paid-fallback") {
+  if (billingMode !== undefined && billingMode !== "auto" && billingMode !== "subscription" && billingMode !== "paid-fallback") {
     return undefined;
   }
   if (!Array.isArray(value.requiredMeters)) {
@@ -1702,7 +1702,7 @@ function parseProviderAccountRouting(value: unknown): ProviderAccountConfig["rou
     return undefined;
   }
   return {
-    billingMode,
+    billingMode: billingMode ?? "auto",
     mode: "subscription-first",
     requiredMeters
   };

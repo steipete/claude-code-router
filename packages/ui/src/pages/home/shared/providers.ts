@@ -2139,7 +2139,7 @@ export function providerMatchesQuery(provider: GatewayProviderConfig, query: str
 }
 
 export function viewUsesInternalScroll(view: ViewId): boolean {
-  return view === "observability" || view === "api-keys" || view === "profile" || view === "networking" || view === "logs" || view === "providers" || view === "models" || view === "routing" || view === "virtual-models" || view === "extensions";
+  return view === "subscriptions" || view === "observability" || view === "api-keys" || view === "profile" || view === "networking" || view === "logs" || view === "providers" || view === "models" || view === "routing" || view === "virtual-models" || view === "extensions";
 }
 
 export function uniqueProviderName(providers: GatewayProviderConfig[], baseName = "provider"): string {

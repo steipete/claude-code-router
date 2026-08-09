@@ -10,5 +10,6 @@ export { ProfileView, AddProfileForm, AddProfileDialog, DeleteProfileDialog } fr
 export { NetworkingView, LogsView } from "./network-logs";
 export { ProvidersView, ModelsView, DeleteProviderDialog, ProviderDeepLinkDialog, AddProviderForm, AddProviderDialog } from "./providers";
 export { RoutingView, DeleteRoutingRuleDialog, AddRoutingRuleDialog } from "./routing";
+export { SubscriptionsView } from "./subscriptions";
 export { ExtensionsView, DeleteExtensionDialog, PluginSettingsDialog, ConfigureClaudeDesignDialog } from "./extensions";
 export { VirtualModelsView, VirtualModelDialog, InstallExtensionDialog } from "./virtual-models";

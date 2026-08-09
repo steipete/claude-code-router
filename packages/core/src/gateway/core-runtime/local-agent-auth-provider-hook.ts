@@ -4,9 +4,8 @@ import { kimiAccessTokenExpired, kimiIdentityHeaders } from "@ccr/core/agents/lo
 import { transformCodexApplyPatchBridgeRequestBody } from "@ccr/core/gateway/features/codex-patch-bridge";
 import { prepareClaudeCodeOauthBody } from "@ccr/core/agents/local-providers/claude-code-cch";
 import { randomUUID } from "node:crypto";
-import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta } from "@ccr/core/gateway/internal/shared";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
-import { mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
+import { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, claudeCodeOauthUserAgent, mergeAnthropicBetaValues } from "@ccr/core/providers/oauth-plugin";
 
 const configProviderPluginKeyPrefix = "config:";
 const localAgentProviderPluginKeyPrefix = "ccr-local-agent-";
@@ -172,7 +171,7 @@ function applyClaudeCodeIdentityHeaders(headers: HeaderRecord, sessionId: string
     "Accept-Encoding": "gzip, deflate, br",
     "Anthropic-Dangerous-Direct-Browser-Access": "true",
     "Anthropic-Version": "2023-06-01",
-    "User-Agent": "claude-cli/2.1.223 (external, cli)",
+    "User-Agent": claudeCodeOauthUserAgent,
     "X-App": "cli",
     "X-Claude-Code-Session-Id": sessionId,
     "X-Client-Request-Id": randomUUID(),

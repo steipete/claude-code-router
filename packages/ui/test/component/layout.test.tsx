@@ -18,7 +18,7 @@ test("sidebar navigation groups pages and hides networking from the sidebar", ()
   assert.deepEqual(groups.map((group) => group.items.map((item) => item.id)), [
     ["overview"],
     ["providers", "profile", "routing"],
-    ["logs", "observability"],
+    ["subscriptions", "logs", "observability"],
     ["virtual-models", "models", "api-keys", "extensions"]
   ]);
   assert.equal(groups.some((group) => group.items.some((item) => item.id === "networking")), false);
@@ -27,7 +27,7 @@ test("sidebar navigation groups pages and hides networking from the sidebar", ()
   assert.deepEqual(filteredGroups.map((group) => group.items.map((item) => item.id)), [
     ["overview"],
     ["providers", "profile", "routing"],
-    ["logs"],
+    ["subscriptions", "logs"],
     ["virtual-models", "models", "api-keys", "extensions"]
   ]);
 });

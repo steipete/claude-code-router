@@ -225,9 +225,7 @@ export class UpstreamRequestError extends Error {
 
 export const requireFromHere = createRequire(__filename);
 
-export const claudeCodeOauthBetaHeader = "anthropic-beta";
-
-export const claudeCodeOauthRequiredBeta = "oauth-2025-04-20";
+export { claudeCodeOauthBetaHeader, claudeCodeOauthRequiredBeta, claudeCodeOauthUserAgent } from "@ccr/core/providers/oauth-plugin";
 
 export const coreGatewayAuthHeader = "x-ccr-core-auth";
 

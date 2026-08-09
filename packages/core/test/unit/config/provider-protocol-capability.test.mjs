@@ -37,6 +37,28 @@ test("provider parsing preserves generic subscription-first credential routing",
   assert.deepEqual(providers?.[0]?.credentials?.[0]?.account?.routing, routing);
 });
 
+test("provider parsing defaults omitted subscription billing mode to auto", async () => {
+  const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
+  const providers = parseProvidersForTest([{
+    credentials: [{
+      account: {
+        enabled: true,
+        routing: {
+          mode: "subscription-first",
+          requiredMeters: [{ id: "weekly" }]
+        }
+      },
+      apiKey: "synthetic-key",
+      id: "auto"
+    }],
+    models: ["claude-fable-5"],
+    name: "Claude Pool",
+    type: "anthropic_messages"
+  }]);
+
+  assert.equal(providers?.[0]?.credentials?.[0]?.account?.routing?.billingMode, "auto");
+});
+
 test("top-level provider protocol becomes a capability when none are configured", async () => {
   const { parseProvidersForTest } = await import("@ccr/core/config/config.ts");
   const providers = parseProvidersForTest([
