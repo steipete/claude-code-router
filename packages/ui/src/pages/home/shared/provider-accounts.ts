@@ -6,6 +6,13 @@ import {
   formatCompactNumber
 } from "./usage";
 
+export const PROVIDER_ACCOUNT_METER_HEALTH_THRESHOLDS = {
+  exhaustedRemainingPercent: 5,
+  warningRemainingPercent: 20
+} as const;
+
+export type ProviderAccountMeterHealth = "exhausted" | "healthy" | "unknown" | "warning";
+
 export function compareProviderAccountSnapshots(a: ProviderAccountSnapshot, b: ProviderAccountSnapshot): number {
   return (
     providerAccountStatusRank(b.status) - providerAccountStatusRank(a.status) ||
@@ -53,15 +60,78 @@ export function providerAccountMetersForDisplay(account: ProviderAccountSnapshot
 }
 
 export function providerAccountMeterRemainingRatio(meter: ProviderAccountMeter): number | undefined {
-  if (!meter.limit || meter.limit <= 0 || meter.remaining === undefined) {
+  if (!meter.limit || meter.limit <= 0) {
     return undefined;
   }
-  return Math.max(0, Math.min(1, meter.remaining / meter.limit));
+  const remaining = meter.remaining ?? (meter.used === undefined ? undefined : meter.limit - meter.used);
+  if (!Number.isFinite(remaining)) {
+    return undefined;
+  }
+  return Math.max(0, Math.min(1, (remaining as number) / meter.limit));
 }
 
 export function providerAccountMeterProgress(meter: ProviderAccountMeter): number | undefined {
   const ratio = providerAccountMeterRemainingRatio(meter);
-  return ratio === undefined ? undefined : Math.max(3, Math.round(ratio * 100));
+  return ratio === undefined ? undefined : Math.round(ratio * 100);
+}
+
+export function providerAccountMeterHealth(meter: ProviderAccountMeter): ProviderAccountMeterHealth {
+  const ratio = providerAccountMeterRemainingRatio(meter);
+  return providerAccountRemainingHealth(ratio === undefined ? undefined : ratio * 100);
+}
+
+export function providerAccountHealthLabel(health: ProviderAccountMeterHealth, t: (value: string) => string): string {
+  if (health === "healthy") return t("Healthy");
+  if (health === "warning") return t("Low");
+  if (health === "exhausted") return t("Exhausted");
+  return t("Unknown");
+}
+
+export function providerAccountRemainingHealth(remainingPercent: number | undefined): ProviderAccountMeterHealth {
+  if (remainingPercent === undefined || !Number.isFinite(remainingPercent)) {
+    return "unknown";
+  }
+  if (remainingPercent <= PROVIDER_ACCOUNT_METER_HEALTH_THRESHOLDS.exhaustedRemainingPercent) {
+    return "exhausted";
+  }
+  if (remainingPercent <= PROVIDER_ACCOUNT_METER_HEALTH_THRESHOLDS.warningRemainingPercent) {
+    return "warning";
+  }
+  return "healthy";
+}
+
+export function providerAccountMeterHealthClass(meter: ProviderAccountMeter): string {
+  return providerAccountHealthClass(providerAccountMeterHealth(meter));
+}
+
+export function providerAccountHealthClass(health: ProviderAccountMeterHealth): string {
+  if (health === "exhausted") {
+    return "bg-red-500";
+  }
+  if (health === "warning") {
+    return "bg-amber-500";
+  }
+  if (health === "healthy") {
+    return "bg-emerald-500";
+  }
+  return "bg-muted-foreground/40";
+}
+
+export function providerAccountMeterHealthStroke(meter: ProviderAccountMeter): string {
+  return providerAccountHealthStroke(providerAccountMeterHealth(meter));
+}
+
+export function providerAccountHealthStroke(health: ProviderAccountMeterHealth): string {
+  if (health === "exhausted") {
+    return "var(--color-red-500)";
+  }
+  if (health === "warning") {
+    return "var(--color-amber-500)";
+  }
+  if (health === "healthy") {
+    return "var(--color-emerald-500)";
+  }
+  return "var(--muted-foreground)";
 }
 
 export function providerAccountMeterValidityProgress(meter: ProviderAccountMeter, now = Date.now()): number | undefined {
@@ -133,16 +203,6 @@ export function providerAccountBadgeVariant(status: ProviderAccountSnapshot["sta
     return "success";
   }
   return "outline";
-}
-
-export function providerAccountProgressClass(status: ProviderAccountSnapshot["status"]): string {
-  if (status === "critical" || status === "error") {
-    return "bg-red-500";
-  }
-  if (status === "warning") {
-    return "bg-amber-500";
-  }
-  return "bg-emerald-500";
 }
 
 export function formatProviderAccountMeterValue(

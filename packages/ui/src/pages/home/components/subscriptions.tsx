@@ -9,7 +9,14 @@ import type {
 } from "@ccr/core/contracts/app";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { isGatewayProviderEnabled, useAppText } from "../shared/index";
+import {
+  isGatewayProviderEnabled,
+  providerAccountHealthClass,
+  providerAccountHealthLabel,
+  providerAccountMeterRemainingRatio,
+  providerAccountRemainingHealth,
+  useAppText
+} from "../shared/index";
 
 type RoutingState = "available" | "exhausted" | "unavailable" | "unknown";
 
@@ -161,6 +168,7 @@ function SubscriptionHealthRow({ row, rows }: { row: SubscriptionRow; rows: Subs
         <div>
           <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t("Extra usage")}</div>
           <div className="mt-1 text-[12px] font-medium">{formatSpend(spend, snapshot?.extraUsageEnabled, t)}</div>
+          <SpendMeter meter={spend} />
           {snapshot?.spendLimitReached ? (
             <div className="mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-500">
               <AlertTriangle className="h-3 w-3" /> {t("Spend limit reached")}
@@ -180,10 +188,38 @@ function SubscriptionHealthRow({ row, rows }: { row: SubscriptionRow; rows: Subs
   );
 }
 
+function SpendMeter({ meter }: { meter?: ProviderAccountMeter }) {
+  const t = useAppText();
+  // Spend is a currency amount against a currency limit, not a percentage like
+  // the quota meters, so it has to go through the ratio helper.
+  const remainingRatio = meter ? providerAccountMeterRemainingRatio(meter) : undefined;
+  const used = remainingRatio === undefined ? undefined : (1 - remainingRatio) * 100;
+  const health = providerAccountRemainingHealth(remainingRatio === undefined ? undefined : remainingRatio * 100);
+  if (used === undefined) return null;
+  return (
+    <div
+      aria-label={`${t("Extra usage")} ${t("Used")}`}
+      aria-valuemax={100}
+      aria-valuemin={0}
+      aria-valuenow={used}
+      aria-valuetext={`${formatPercentValue(used)}% ${t("Used")} (${providerAccountHealthLabel(health, t)})`}
+      className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"
+      role="meter"
+    >
+      <div
+        className={cn("h-full rounded-full transition-[width]", providerAccountHealthClass(health))}
+        data-meter-axis="used"
+        data-meter-health={health}
+        style={{ width: `${used}%` }}
+      />
+    </div>
+  );
+}
+
 function QuotaMeter({ meter, title, tone }: { meter?: ProviderAccountMeter; title: string; tone: "fable" | "session" | "weekly" }) {
   const t = useAppText();
-  const used = meterUsedPercent(meter);
   const remaining = meterRemainingPercent(meter);
+  const health = providerAccountRemainingHealth(remaining);
   return (
     <div className={cn(
       "rounded-lg border bg-background/60 p-3",
@@ -191,12 +227,31 @@ function QuotaMeter({ meter, title, tone }: { meter?: ProviderAccountMeter; titl
     )}>
       <div className="flex items-center justify-between gap-2">
         <div className={cn("text-[11px] font-semibold", tone === "fable" && "text-amber-600 dark:text-amber-400")}>{title}</div>
-        <div className="text-[11px] font-semibold tabular-nums">{used === undefined ? "—" : `${formatPercentValue(used)}%`}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] font-semibold tabular-nums">{remaining === undefined ? "—" : `${formatPercentValue(remaining)}%`}</span>
+          <span className="text-[9px] font-bold uppercase tracking-wide text-muted-foreground">{providerAccountHealthLabel(health, t)}</span>
+        </div>
       </div>
       {tone === "fable" ? <div className="mt-0.5 text-[9px] font-medium uppercase tracking-wide text-amber-600/80 dark:text-amber-400/80">{t("Separate allowance")}</div> : null}
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted" role="meter" aria-label={`${title} usage`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={used}>
-        {used !== undefined ? <div className={cn("h-full rounded-full transition-[width]", meterBarClass(tone, remaining))} style={{ width: `${Math.max(2, Math.min(100, used))}%` }} /> : null}
-      </div>
+      {remaining === undefined ? (
+        <div aria-label={`${title}: ${t("Usage unavailable")}`} className="mt-2 h-2 overflow-hidden rounded-full bg-muted" />
+      ) : (
+        <div
+          aria-label={`${title} ${t("left")}`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={remaining}
+          aria-valuetext={`${formatPercentValue(remaining)}% ${t("left")} (${providerAccountHealthLabel(health, t)})`}
+          className="mt-2 h-2 overflow-hidden rounded-full bg-muted"
+          role="meter"
+        >
+          <div
+            className={cn("h-full rounded-full transition-[width]", providerAccountHealthClass(health))}
+            data-meter-health={health}
+            style={{ width: `${remaining}%` }}
+          />
+        </div>
+      )}
       <div className="mt-2 flex items-center justify-between gap-2 text-[9px] text-muted-foreground">
         <span>{remaining === undefined ? t("Usage unavailable") : `${formatPercentValue(remaining)}% ${t("left")}`}</span>
         <span className="truncate" title={meter?.resetAt}>{t("Resets")} {formatResetTime(meter?.resetAt)}</span>
@@ -330,26 +385,11 @@ function meterRemaining(snapshot: ProviderAccountSnapshot | undefined, id: strin
   return Number.isFinite(remaining) ? remaining as number : undefined;
 }
 
-function meterUsedPercent(meter: ProviderAccountMeter | undefined): number | undefined {
-  if (!meter) return undefined;
-  const used = meter.used ?? (meter.limit !== undefined && meter.remaining !== undefined ? meter.limit - meter.remaining : undefined);
-  if (!Number.isFinite(used)) return undefined;
-  return Math.max(0, Math.min(100, used as number));
-}
-
 function meterRemainingPercent(meter: ProviderAccountMeter | undefined): number | undefined {
   if (!meter) return undefined;
   const remaining = meter.remaining ?? (meter.limit !== undefined && meter.used !== undefined ? meter.limit - meter.used : undefined);
   if (!Number.isFinite(remaining)) return undefined;
   return Math.max(0, Math.min(100, remaining as number));
-}
-
-function meterBarClass(tone: "fable" | "session" | "weekly", remaining: number | undefined): string {
-  if (remaining !== undefined && remaining <= 5) return "bg-red-500";
-  if (remaining !== undefined && remaining <= 20) return "bg-orange-500";
-  if (tone === "fable") return "bg-amber-500";
-  if (tone === "weekly") return "bg-sky-500";
-  return "bg-emerald-500";
 }
 
 function stateDotClass(state: RoutingState): string {

@@ -13,7 +13,7 @@ import {
   motion, normalizeAgentFilterValue, normalizeOverviewWidget, normalizeOverviewWidgets,
   OverviewMetricKind, overviewMetricOptions, overviewWidgetCollisionDetection, OverviewWidgetConfig, OverviewWidgetSize, overviewWidgetSizeOptions,
   OverviewWidgetType, OverviewWidgetVariant, Pencil, Pie, PieChart, Plus,
-  PointerSensor, primaryProviderAccountMeter, providerAccountMeterDetailValidityProgress, providerAccountMeterProgress, providerAccountMetersForDisplay, providerAccountProgressClass, isGatewayProviderEnabled, isProviderAccountManualResetMeter,
+  PointerSensor, primaryProviderAccountMeter, providerAccountMeterDetailValidityProgress, providerAccountMeterHealth, providerAccountMeterHealthClass, providerAccountMeterHealthStroke, providerAccountMeterProgress, providerAccountMeterRemainingRatio, providerAccountHealthLabel, providerAccountMetersForDisplay, isGatewayProviderEnabled, isProviderAccountManualResetMeter,
   providerAccountSnapshotKey, providerAccountSnapshotLabel,
   ProviderAccountMeter, ProviderAccountSnapshot, ReactNode, ReactPointerEvent, rectSortingStrategy, RefreshCw, Select,
   SelectControl, SortableContext, sortableKeyboardCoordinates, systemStatusPointTooltip,
@@ -2360,13 +2360,25 @@ function ProviderAccountsOverview({
                       {providerAccountShowRefreshTime(dimensions) ? <div className="truncate text-[11px] text-muted-foreground">{formatProviderAccountRefreshTime(account, t)}</div> : null}
                     </div>
                     <div className="flex shrink-0 items-center gap-2 text-[12px] font-semibold">
-                      {meter ? <span>{formatProviderAccountMeterValue(meter)}</span> : null}
+                      {meter ? <><span>{formatProviderAccountMeterValue(meter)}</span><ProviderAccountMeterHealthLabel meter={meter} /></> : null}
                       {providerAccountShowRefresh(dimensions) ? <ProviderAccountRefreshButton account={account} refreshing={refreshing} onRefresh={onRefresh} /> : null}
                     </div>
                   </div>
-                  {progress !== undefined ? (
-                    <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted">
-                      <div className={cn("h-full rounded-full", providerAccountProgressClass(account.status))} style={{ width: `${progress}%` }} />
+                  {meter && progress !== undefined ? (
+                    <div
+                      aria-label={`${t(meter.label)} ${t("left")}`}
+                      aria-valuemax={100}
+                      aria-valuemin={0}
+                      aria-valuenow={progress}
+                      aria-valuetext={`${progress}% ${t("left")} (${providerAccountMeterHealthLabel(meter, t)})`}
+                      className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted"
+                      role="meter"
+                    >
+                      <div
+                        className={cn("h-full rounded-full", providerAccountMeterHealthClass(meter))}
+                        data-meter-health={providerAccountMeterHealth(meter)}
+                        style={{ width: `${progress}%` }}
+                      />
                     </div>
                   ) : null}
                 </div>
@@ -2421,7 +2433,7 @@ function ProviderAccountSinglePanel({
         {providerAccountShowRefresh(dimensions) ? <ProviderAccountRefreshButton account={account} refreshing={refreshing} onRefresh={onRefresh} /> : null}
       </div>
       {showQuotaVisual ? (
-        <ProviderAccountQuotaVisual account={account} dimensions={dimensions} meters={quotaMeters} variant={variant} />
+        <ProviderAccountQuotaVisual dimensions={dimensions} meters={quotaMeters} variant={variant} />
       ) : quotaMeters.length === 0 && balanceMeter ? (
         <ProviderAccountBalanceMetric dimensions={dimensions} meter={balanceMeter} />
       ) : meters.length > 0 ? (
@@ -2470,7 +2482,7 @@ function ProviderAccountSummaryCard({
       </div>
       {showQuotaVisual ? (
         <div className="mt-2 min-h-0 overflow-hidden">
-          <ProviderAccountQuotaVisual account={account} dimensions={dimensions} meters={quotaMeters} variant={variant} />
+          <ProviderAccountQuotaVisual dimensions={dimensions} meters={quotaMeters} variant={variant} />
         </div>
       ) : quotaMeters.length === 0 && balanceMeter ? (
         <div className="mt-2 min-h-0 overflow-hidden">
@@ -2570,7 +2582,10 @@ function ProviderAccountMeterLine({
         ) : null}
         <div className={titleClassName}>{title}</div>
       </div>
-      <div className={valueClassName}>{formatProviderAccountMeterValue(meter, t)}</div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <div className={valueClassName}>{formatProviderAccountMeterValue(meter, t)}</div>
+        <ProviderAccountMeterHealthLabel meter={meter} />
+      </div>
     </>
   );
 
@@ -2593,14 +2608,26 @@ function ProviderAccountMeterLine({
         </div>
       )}
       {progress !== undefined && providerAccountShowProgress(dimensions) ? (
-        <div className={cn("mt-1.5 overflow-hidden rounded-full", single ? "bg-muted" : "bg-background", dimensions.height <= 1 ? "h-1.5" : "h-2")}>
-          <div className={cn("h-full rounded-full", providerAccountProgressClass(account.status))} style={{ width: `${progress}%` }} />
+        <div
+          aria-label={`${title} ${t("left")}`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progress}
+          aria-valuetext={`${progress}% ${t("left")} (${providerAccountMeterHealthLabel(meter, t)})`}
+          className={cn("mt-1.5 overflow-hidden rounded-full", single ? "bg-muted" : "bg-background", dimensions.height <= 1 ? "h-1.5" : "h-2")}
+          role="meter"
+        >
+          <div
+            className={cn("h-full rounded-full", providerAccountMeterHealthClass(meter))}
+            data-meter-health={providerAccountMeterHealth(meter)}
+            style={{ width: `${progress}%` }}
+          />
         </div>
       ) : null}
       <AnimatePresence initial={false}>
         {canExpandDetails && detailsOpen ? (
           <AnimatedDisclosure>
-            <ProviderAccountMeterDetails account={account} detailsId={detailsId} meter={meter} onReset={setResetDialogDetail} />
+            <ProviderAccountMeterDetails detailsId={detailsId} meter={meter} onReset={setResetDialogDetail} />
           </AnimatedDisclosure>
         ) : null}
       </AnimatePresence>
@@ -2616,13 +2643,34 @@ function ProviderAccountMeterLine({
   );
 }
 
+function ProviderAccountMeterHealthLabel({ meter }: { meter: ProviderAccountMeter }) {
+  const t = useAppText();
+  const health = providerAccountMeterHealth(meter);
+  return (
+    <span
+      className={cn(
+        "rounded-sm border px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide",
+        health === "healthy" && "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+        health === "warning" && "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        health === "exhausted" && "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300",
+        health === "unknown" && "border-border bg-muted text-muted-foreground"
+      )}
+      data-meter-health-label={health}
+    >
+      {providerAccountMeterHealthLabel(meter, t)}
+    </span>
+  );
+}
+
+function providerAccountMeterHealthLabel(meter: ProviderAccountMeter, t: (value: string) => string): string {
+  return providerAccountHealthLabel(providerAccountMeterHealth(meter), t);
+}
+
 function ProviderAccountMeterDetails({
-  account,
   detailsId,
   meter,
   onReset
 }: {
-  account: ProviderAccountSnapshot;
   detailsId: string;
   meter: ProviderAccountMeter;
   onReset: (detail: NonNullable<ProviderAccountMeter["details"]>[number]) => void;
@@ -2667,7 +2715,7 @@ function ProviderAccountMeterDetails({
             </div>
             {detailProgress !== undefined ? (
               <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
-                <div className={cn("h-full rounded-full", providerAccountProgressClass(account.status))} style={{ width: `${detailProgress}%` }} />
+                <div className="h-full rounded-full bg-primary" style={{ width: `${detailProgress}%` }} />
               </div>
             ) : null}
           </div>
@@ -3079,12 +3127,10 @@ function ProviderAccountBalanceMetric({
 }
 
 function ProviderAccountQuotaVisual({
-  account,
   dimensions,
   meters,
   variant
 }: {
-  account: ProviderAccountSnapshot;
   dimensions: OverviewWidgetDimensions;
   meters: ProviderAccountMeter[];
   variant: OverviewAccountVariant;
@@ -3100,7 +3146,7 @@ function ProviderAccountQuotaVisual({
 
   return (
     <div className={cn("flex min-h-0 min-w-0 items-center overflow-hidden", showLabels ? "justify-center gap-4" : "justify-center")}>
-      <ProviderAccountQuotaGauge account={account} dimensions={dimensions} meters={displayMeters} variant={variant} />
+      <ProviderAccountQuotaGauge dimensions={dimensions} meters={displayMeters} variant={variant} />
       {showLabels ? (
         <div className="min-w-0 space-y-2">
           {displayMeters.slice(0, variant === "nested-rings" ? 2 : 1).map((meter) => {
@@ -3118,12 +3164,10 @@ function ProviderAccountQuotaVisual({
 }
 
 function ProviderAccountQuotaGauge({
-  account,
   dimensions,
   meters,
   variant
 }: {
-  account: ProviderAccountSnapshot;
   dimensions: OverviewWidgetDimensions;
   meters: ProviderAccountMeter[];
   variant: OverviewAccountVariant;
@@ -3131,10 +3175,10 @@ function ProviderAccountQuotaGauge({
   const t = useAppText();
   const primary = meters[0];
   const secondary = meters[1];
-  const primaryRatio = providerAccountMeterRatio(primary) ?? 0;
-  const secondaryRatio = secondary ? providerAccountMeterRatio(secondary) ?? 0 : 0;
-  const stroke = providerAccountProgressStroke(account.status);
-  const secondaryStroke = "#2563eb";
+  const primaryRatio = providerAccountMeterRemainingRatio(primary) ?? 0;
+  const secondaryRatio = secondary ? providerAccountMeterRemainingRatio(secondary) ?? 0 : 0;
+  const stroke = providerAccountMeterHealthStroke(primary);
+  const secondaryStroke = secondary ? providerAccountMeterHealthStroke(secondary) : stroke;
   const compact = dimensions.height <= 1 || dimensions.width <= 1;
   const sizeClass = compact ? "h-[72px] w-[72px]" : dimensions.height >= 3 ? "h-[124px] w-[124px]" : "h-[104px] w-[104px]";
 
@@ -3259,7 +3303,7 @@ function isProviderAccountBalanceMeter(meter: ProviderAccountMeter): boolean {
 }
 
 function isProviderAccountQuotaMeter(meter: ProviderAccountMeter): boolean {
-  return meter.kind !== "balance" && providerAccountMeterRatio(meter) !== undefined;
+  return meter.kind !== "balance" && providerAccountMeterRemainingRatio(meter) !== undefined;
 }
 
 function compareProviderAccountQuotaMeters(a: ProviderAccountMeter, b: ProviderAccountMeter): number {
@@ -3290,25 +3334,8 @@ function providerAccountQuotaMetersForVisual(meters: ProviderAccountMeter[], var
   return result.slice(0, 2);
 }
 
-function providerAccountMeterRatio(meter: ProviderAccountMeter): number | undefined {
-  if (!meter.limit || meter.limit <= 0 || meter.remaining === undefined) {
-    return undefined;
-  }
-  return Math.max(0, Math.min(1, meter.remaining / meter.limit));
-}
-
 function providerAccountUsesQuotaVisual(variant: OverviewAccountVariant): boolean {
   return variant === "arc" || variant === "nested-rings" || variant === "ring" || variant === "semicircle";
-}
-
-function providerAccountProgressStroke(status: ProviderAccountSnapshot["status"]): string {
-  if (status === "critical" || status === "error") {
-    return "#ef4444";
-  }
-  if (status === "warning") {
-    return "#f59e0b";
-  }
-  return "#10b981";
 }
 
 function describeSvgArc(cx: number, cy: number, radius: number, startAngle: number, endAngle: number): string {

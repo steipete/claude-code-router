@@ -772,6 +772,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       "Email unavailable": "邮箱不可用",
       "available": "可用",
       "exhausted": "已耗尽",
+      "Exhausted": "已耗尽",
       "unavailable": "不可用",
       "Tier unknown": "套餐未知",
       "Fable weekly": "Fable 每周",
