@@ -19,6 +19,10 @@ A: Request logs show `request model`, `resolved provider`, and `resolved model`.
 
 A: Related fields include API Key, credential enabled state, Base URL, protocol, and extra request headers. The provider page provides model connectivity checks.
 
+### Q: Why does Claude reject a request with too many `cache_control` blocks?
+
+A: Anthropic allows four prompt-cache breakpoints across tools, system blocks, and message content. Automatic caching also uses a slot. CCR preserves the client's breakpoints and adds a cache marker to its Claude OAuth identity block only when a slot remains. If the client already exceeds the limit, reduce its breakpoints; switching accounts cannot fix an invalid request.
+
 ### Q: How do I diagnose `model not found`?
 
 A: The provider model list, the model selected by routing, and the model in Agent Profiles can all affect `model not found`.

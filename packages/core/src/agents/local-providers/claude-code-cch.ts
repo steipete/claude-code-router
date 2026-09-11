@@ -16,7 +16,11 @@ export function prepareClaudeCodeOauthBody(value: unknown, version = "2.1.223"):
   } else {
     system.unshift(
       { text: billing, type: "text" },
-      { cache_control: { type: "ephemeral" }, text: claudeCodeIdentity, type: "text" }
+      {
+        ...(cacheBreakpointCount(body, system) < 4 ? { cache_control: { type: "ephemeral" } } : {}),
+        text: claudeCodeIdentity,
+        type: "text"
+      }
     );
   }
   body.system = system;
@@ -24,6 +28,20 @@ export function prepareClaudeCodeOauthBody(value: unknown, version = "2.1.223"):
   const normalized = JSON.stringify(normalizeCchValue(body));
   const cch = (xxhash64(Buffer.from(normalized), cchSeed) & 0xfffffn).toString(16).padStart(5, "0");
   return JSON.parse(unsigned.replace("cch=00000;", `cch=${cch};`)) as unknown;
+}
+
+function cacheBreakpointCount(body: Record<string, unknown>, system: Array<Record<string, unknown>>): number {
+  const groups: unknown[] = [system, body.tools];
+  for (const message of Array.isArray(body.messages) ? body.messages : []) {
+    if (isRecord(message)) groups.push(message.content);
+  }
+  // Automatic caching shares Anthropic's four slots with explicit block breakpoints.
+  let count = isRecord(body.cache_control) ? 1 : 0;
+  for (const group of groups) {
+    if (!Array.isArray(group)) continue;
+    count += group.filter(block => isRecord(block) && isRecord(block.cache_control)).length;
+  }
+  return count;
 }
 
 function normalizeSystem(value: unknown): Array<Record<string, unknown>> {
