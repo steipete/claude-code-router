@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -157,8 +157,9 @@ test("Fable fallback rewrites preserve client betas across Claude OAuth authenti
   assert.deepEqual(attempt.body.fallbacks, [{ model: "claude-opus-5" }]);
 });
 
-test("Claude OAuth provider hooks bind an explicit runtime credential to its auth file", async () => {
+test("Claude OAuth provider hooks bind an explicit runtime credential to its auth file", async (t) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "ccr-claude-hook-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const sourceFile = path.join(directory, "account.json");
   writeFileSync(sourceFile, JSON.stringify({
     account_uuid: "11111111-2222-4333-8444-555555555555",
@@ -205,4 +206,19 @@ test("Claude OAuth provider hooks bind an explicit runtime credential to its aut
     device_id: "a".repeat(64),
     session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
   });
+
+  const cachedBody = {
+    model: "model-a",
+    system: [{ type: "text", text: "System prompt.", cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [1, 2, 3].map(index => ({
+      type: "text", text: `Document ${index}.`, cache_control: { type: "ephemeral" }
+    })) }]
+  };
+  const cachedResult = await hook.authenticate({
+    upstreamRequest: { body: cachedBody, url: "https://api.anthropic.com/v1/messages" }
+  });
+  assert.equal(cachedResult.ok, true);
+  assert.equal(cachedResult.value.body.system[1].cache_control, undefined);
+  assert.deepEqual(cachedResult.value.body.system.slice(2), cachedBody.system);
+  assert.deepEqual(cachedResult.value.body.messages, cachedBody.messages);
 });
